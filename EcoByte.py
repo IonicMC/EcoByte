@@ -2,6 +2,7 @@ import os
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["QT_QPA_PLATFORMTHEME"] = ""
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
+os.environ.setdefault("SDL_AUDIODRIVER", "pulseaudio")
 
 import sys
 import time
@@ -10,6 +11,7 @@ import json
 import math
 import random
 
+import pygame
 import RPi.GPIO as GPIO
 import qrcode
 
@@ -65,6 +67,10 @@ BOTTLE_ALPHA = 38           # subtle
 BOTTLE_SPEED_MIN = 0.7
 BOTTLE_SPEED_MAX = 1.8
 
+# Sound volumes
+VOL_MAIN = 0.70
+VOL_LOW = 0.20
+
 
 # ============================================================
 # Helpers
@@ -96,7 +102,94 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 
 # ============================================================
+# Sound (pygame, WAV) - safe if missing files
+# Put files here: /home/rayshan/EcoByte/sounds/
+#   idle.wav tap.wav success.wav scan_ok.wav qr_show.wav
+# ============================================================
+
+class SoundManager:
+    def __init__(self):
+        self.ok = False
+        self.base = os.path.join(os.path.dirname(__file__), "sounds")
+
+        self.tap = None
+        self.success = None
+        self.scan_ok = None
+        self.qr_show = None
+
+        try:
+            pygame.mixer.pre_init(44100, -16, 2, 2048)
+            pygame.mixer.init()
+            self.ok = True
+        except Exception as e:
+            print("Audio init failed:", e)
+            return
+
+        def p(name): return os.path.join(self.base, name)
+
+        def load_sfx(name):
+            path = p(name)
+            if os.path.exists(path):
+                try:
+                    return pygame.mixer.Sound(path)
+                except Exception as e:
+                    print(f"Failed to load {name}:", e)
+            return None
+
+        # music
+        idle = p("idle.wav")
+        if os.path.exists(idle):
+            try:
+                pygame.mixer.music.load(idle)
+                pygame.mixer.music.set_volume(VOL_MAIN)
+                pygame.mixer.music.play(-1)
+            except Exception as e:
+                print("Music load/play failed:", e)
+
+        # sfx
+        self.tap = load_sfx("tap.wav")
+        self.success = load_sfx("success.wav")
+        self.scan_ok = load_sfx("scan_ok.wav")
+        self.qr_show = load_sfx("qr_show.wav")
+
+        # sfx volumes (optional)
+        for s, v in [(self.tap, 0.55), (self.success, 0.75), (self.scan_ok, 0.85), (self.qr_show, 0.65)]:
+            if s is not None:
+                try:
+                    s.set_volume(v)
+                except Exception:
+                    pass
+
+    def set_main_volume(self):
+        if self.ok:
+            try:
+                pygame.mixer.music.set_volume(VOL_MAIN)
+            except Exception:
+                pass
+
+    def set_low_volume(self):
+        if self.ok:
+            try:
+                pygame.mixer.music.set_volume(VOL_LOW)
+            except Exception:
+                pass
+
+    def _play(self, sfx):
+        if sfx is not None:
+            try:
+                sfx.play()
+            except Exception:
+                pass
+
+    def play_tap(self): self._play(self.tap)
+    def play_success(self): self._play(self.success)
+    def play_scan_ok(self): self._play(self.scan_ok)
+    def play_qr_show(self): self._play(self.qr_show)
+
+
+# ============================================================
 # Animated Background: Waves + Falling Bottles (NO float crash)
+# FIXED: removes hard top sheen line (soft fade instead)
 # ============================================================
 
 class _BottleParticle:
@@ -150,7 +243,6 @@ class WaterBackground(QWidget):
         y0 = cy - body_h / 2
 
         path = QPainterPath()
-        # Use QRectF-friendly overload by passing floats into addRoundedRect (OK)
         path.addRoundedRect(float(x0), float(y0 + neck_h), float(body_w), float(body_h - neck_h), float(10*s), float(10*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0), float(neck_w), float(neck_h), float(6*s), float(6*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0 - cap_h), float(neck_w), float(cap_h), float(4*s), float(4*s))
@@ -159,7 +251,6 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
-        # Highlight: cast to int for drawRoundedRect overload (fixes your crash)
         hx = int(cx - body_w * 0.22)
         hy = int(y0 + neck_h + body_h * 0.08)
         hw = int(body_w * 0.14)
@@ -181,8 +272,11 @@ class WaterBackground(QWidget):
         grad.setColorAt(1.0, self._bottom)
         p.fillRect(self.rect(), grad)
 
-        # Top sheen
-        p.fillRect(0, 0, w, int(h * 0.16), QColor(255, 255, 255, 18))
+        # Soft top fade (NO hard line)
+        fade = QLinearGradient(0, 0, 0, int(h * 0.28))
+        fade.setColorAt(0.0, QColor(255, 255, 255, 28))
+        fade.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillRect(0, 0, w, int(h * 0.28), fade)
 
         # Falling bottles
         for b in self._bottles:
@@ -388,7 +482,7 @@ class HardwareWorker(QThread):
         return (pulse * 34300.0) / 2.0
 
     def run(self):
-        GPIO.setwarnings(False)   # fixes “channel already in use” spam
+        GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
 
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -451,6 +545,7 @@ class HardwareWorker(QThread):
 
 # ============================================================
 # Redeem Arrow (big → bounces left/right)
+# FIXED: clamp so it won't be cut off + strong glow
 # ============================================================
 
 class BouncingArrow(QWidget):
@@ -478,38 +573,51 @@ class BouncingArrow(QWidget):
         w = self.width()
         h = self.height()
 
-        cx = w * 0.74 + self._offset
-        cy = h * 0.52
-
         arrow_w = 260
         arrow_h = 140
+        margin = 60
+
+        cx = w * 0.74 + self._offset
+        cx = clamp(cx, margin + arrow_w/2, w - margin - arrow_w/2)
+        cy = h * 0.52
 
         path = QPainterPath()
         x0 = cx - arrow_w / 2
         y0 = cy - arrow_h / 2
 
-        path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25), float(arrow_w*0.62), float(arrow_h*0.50), 24, 24)
+        path.addRoundedRect(
+            float(x0), float(y0 + arrow_h * 0.25),
+            float(arrow_w * 0.62), float(arrow_h * 0.50),
+            24, 24
+        )
 
         head = QPainterPath()
-        hx = x0 + arrow_w*0.62
+        hx = x0 + arrow_w * 0.62
         head.moveTo(float(hx), float(y0))
         head.lineTo(float(x0 + arrow_w), float(cy))
         head.lineTo(float(hx), float(y0 + arrow_h))
         head.closeSubpath()
         path = path.united(head)
 
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 180))
-        p.drawPath(path)
+        # Strong glow effect (multi-pass)
+        for i in range(6, 0, -1):
+            alpha = 18 + i * 15
+            width = 6 + i * 4
+            p.setPen(QPen(QColor(255, 255, 255, alpha), width,
+                          Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap,
+                          Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
 
-        pen = QPen(QColor(255, 255, 255, 90), 6)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Solid arrow
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 210))
         p.drawPath(path)
 
 
 # ============================================================
-# QR Widget (scale+fade animation; no layout overlap)
+# QR Widget (scale+fade animation)
 # ============================================================
 
 class QRScaleWidget(QWidget):
@@ -713,10 +821,12 @@ class QRScreen(WaterBackground):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(60, 70, 60, 60)
-        root.setSpacing(14)
+        root.setSpacing(20)  # a bit more breathing room (prevents clipping)
 
-        title = QLabel("Scan to Collect EcoPoints")
+        # FIXED: not cut off
+        title = QLabel("Scan to Collect\nEcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setWordWrap(True)
         title.setFont(QFont("Arial", 56, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
@@ -822,7 +932,7 @@ class RedeemScreen(WaterBackground):
 
 
 # ============================================================
-# Kiosk Controller (FIXED go_redeem + full flow)
+# Kiosk Controller (full flow + sound + idle volume ducking)
 # ============================================================
 
 class Kiosk(QStackedWidget):
@@ -830,6 +940,8 @@ class Kiosk(QStackedWidget):
         super().__init__()
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
+
+        self.sound = SoundManager()
 
         self.main = MainScreen(self)
         self.deposit = DepositScreen(self)
@@ -842,6 +954,7 @@ class Kiosk(QStackedWidget):
         self.addWidget(self.redeem)
 
         self.setCurrentWidget(self.main)
+        self.sound.set_main_volume()
 
         self.session_bottles = 0
 
@@ -868,17 +981,21 @@ class Kiosk(QStackedWidget):
         self.session_bottles = 0
         self.deposit.animate_counts(0)
         self.setCurrentWidget(self.main)
+        self.sound.set_main_volume()
         self.reset_idle()
 
     def start_session(self):
+        self.sound.play_tap()
+        self.sound.set_low_volume()
         self.session_bottles = 0
         self.deposit.animate_counts(0)
         self.worker.set_session(True)
         self.setCurrentWidget(self.deposit)
         self.reset_idle()
 
-    # ✅ FIXED: go_redeem exists now
     def go_redeem(self):
+        self.sound.play_tap()
+        self.sound.set_low_volume()
         self.worker.set_session(False)
         self.setCurrentWidget(self.redeem)
         self.reset_idle()
@@ -886,9 +1003,11 @@ class Kiosk(QStackedWidget):
     def on_bottle_dropped(self):
         self.session_bottles += 1
         self.deposit.animate_counts(self.session_bottles)
+        self.sound.play_success()
         self.reset_idle()
 
     def finish_session(self):
+        self.sound.play_tap()
         self.worker.set_session(False)
 
         bottles = self.session_bottles
@@ -909,11 +1028,13 @@ class Kiosk(QStackedWidget):
 
         self.qr.set_qr(payload_text, bottles)
         self.setCurrentWidget(self.qr)
+        self.sound.play_qr_show()
+        self.sound.set_low_volume()
         self.reset_idle()
 
     def on_redeem_scanned(self, scanned: str):
-        # Placeholder for Firebase verify + SIM800C later
         print("REDEEM SCANNED:", scanned)
+        self.sound.play_scan_ok()
         self.redeem.set_scanned_ok()
         QTimer.singleShot(2000, self.go_main)
 
