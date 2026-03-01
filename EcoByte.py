@@ -2,6 +2,10 @@ import os
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["QT_QPA_PLATFORMTHEME"] = ""
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
+# Stable sizing on Pi
+os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
+os.environ["QT_SCALE_FACTOR"] = "1"
+os.environ["QT_FONT_DPI"] = "96"
 
 import sys
 import time
@@ -48,20 +52,20 @@ GATE_OPEN_MS = 900
 
 POINTS_PER_BOTTLE = 5
 
-# UI sizing (Tech startup A)
+# UI sizing
 BTN_W = 600
 BTN_H = 124
 SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
 # Background animation
-WATER_FPS_MS = 33           # ~30fps
-WAVE_SPEED = 0.075          # faster
+WATER_FPS_MS = 33
+WAVE_SPEED = 0.075
 WAVE_OPACITY = 0.18
 
 # Falling bottles
 BOTTLE_COUNT = 10
-BOTTLE_ALPHA = 38           # subtle
+BOTTLE_ALPHA = 38
 BOTTLE_SPEED_MIN = 0.7
 BOTTLE_SPEED_MAX = 1.8
 
@@ -96,7 +100,49 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 
 # ============================================================
-# Animated Background: Waves + Falling Bottles (NO float crash)
+# Gradient title like your photo (Eco green -> blue)
+# ============================================================
+
+class GradientTitleLabel(QWidget):
+    def __init__(self, text="EcoByte", parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.setMinimumHeight(150)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        font = QFont("Arial", 100, QFont.Weight.Bold)
+        p.setFont(font)
+
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(self.text)
+        th = fm.height()
+
+        x = (self.width() - tw) // 2
+        y = (self.height() + th) // 2 - fm.descent()
+
+        grad = QLinearGradient(x, 0, x + tw, 0)
+        grad.setColorAt(0.0, QColor(80, 220, 120))
+        grad.setColorAt(1.0, QColor(30, 140, 255))
+
+        path = QPainterPath()
+        path.addText(float(x), float(y), font, self.text)
+
+        # soft shadow for pop
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 40))
+        shadow = QPainterPath(path)
+        shadow.translate(0, 5)
+        p.drawPath(shadow)
+
+        p.setBrush(grad)
+        p.drawPath(path)
+
+
+# ============================================================
+# Animated Background: Waves + Falling Bottles (soft top fade)
 # ============================================================
 
 class _BottleParticle:
@@ -117,7 +163,6 @@ class WaterBackground(QWidget):
         self._top = top
         self._bottom = bottom
         self._phase = 0.0
-
         self._bottles = [_BottleParticle() for _ in range(BOTTLE_COUNT)]
 
         self._timer = QTimer(self)
@@ -150,7 +195,6 @@ class WaterBackground(QWidget):
         y0 = cy - body_h / 2
 
         path = QPainterPath()
-        # Use QRectF-friendly overload by passing floats into addRoundedRect (OK)
         path.addRoundedRect(float(x0), float(y0 + neck_h), float(body_w), float(body_h - neck_h), float(10*s), float(10*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0), float(neck_w), float(neck_h), float(6*s), float(6*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0 - cap_h), float(neck_w), float(cap_h), float(4*s), float(4*s))
@@ -159,7 +203,7 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
-        # Highlight: cast to int for drawRoundedRect overload (fixes your crash)
+        # highlight (int overload)
         hx = int(cx - body_w * 0.22)
         hy = int(y0 + neck_h + body_h * 0.08)
         hw = int(body_w * 0.14)
@@ -175,31 +219,32 @@ class WaterBackground(QWidget):
         w = self.width()
         h = self.height()
 
-        # Gradient base
+        # base gradient
         grad = QLinearGradient(0, 0, 0, h)
         grad.setColorAt(0.0, self._top)
         grad.setColorAt(1.0, self._bottom)
         p.fillRect(self.rect(), grad)
 
-        # Top sheen
-        p.fillRect(0, 0, w, int(h * 0.16), QColor(255, 255, 255, 18))
+        # soft top fade (no "random line")
+        fade = QLinearGradient(0, 0, 0, int(h * 0.28))
+        fade.setColorAt(0.0, QColor(255, 255, 255, 28))
+        fade.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillRect(0, 0, w, int(h * 0.28), fade)
 
-        # Falling bottles
+        # falling bottles
         for b in self._bottles:
             sway = math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp
             self._draw_bottle(p, b.x + sway, b.y, 0.85 * b.scale, BOTTLE_ALPHA)
 
-        # Waves overlay
+        # waves
         def wave_path(y_base, amp, freq, shift):
             path = QPainterPath()
             path.moveTo(0, h)
             path.lineTo(0, y_base)
-
             step = max(8, w // 80)
             for x in range(0, w + step, step):
                 y = y_base + amp * math.sin((x * freq) + self._phase + shift)
                 path.lineTo(x, y)
-
             path.lineTo(w, h)
             path.closeSubpath()
             return path
@@ -339,7 +384,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Hardware Worker (cap+ultra latch -> delay -> gate)
+# Hardware Worker
 # ============================================================
 
 class HardwareWorker(QThread):
@@ -388,7 +433,7 @@ class HardwareWorker(QThread):
         return (pulse * 34300.0) / 2.0
 
     def run(self):
-        GPIO.setwarnings(False)   # fixes “channel already in use” spam
+        GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
 
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -450,7 +495,7 @@ class HardwareWorker(QThread):
 
 
 # ============================================================
-# Redeem Arrow (big → bounces left/right)
+# Redeem Arrow with EDGE GLOW
 # ============================================================
 
 class BouncingArrow(QWidget):
@@ -478,11 +523,13 @@ class BouncingArrow(QWidget):
         w = self.width()
         h = self.height()
 
-        cx = w * 0.74 + self._offset
-        cy = h * 0.52
-
         arrow_w = 260
         arrow_h = 140
+        margin = 70
+
+        cx = w * 0.74 + self._offset
+        cx = clamp(cx, margin + arrow_w/2, w - margin - arrow_w/2)
+        cy = h * 0.52
 
         path = QPainterPath()
         x0 = cx - arrow_w / 2
@@ -498,18 +545,25 @@ class BouncingArrow(QWidget):
         head.closeSubpath()
         path = path.united(head)
 
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 180))
-        p.drawPath(path)
+        # EDGE GLOW: draw bright outline glow + outer haze
+        for i in range(10, 0, -1):
+            alpha = 14 + i * 10
+            width = 2 + i * 2
+            p.setPen(QPen(QColor(255, 255, 255, alpha), width,
+                          Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap,
+                          Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
 
-        pen = QPen(QColor(255, 255, 255, 90), 6)
-        p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
+        # solid arrow
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 215))
         p.drawPath(path)
 
 
 # ============================================================
-# QR Widget (scale+fade animation; no layout overlap)
+# QR Widget (scale+fade)
 # ============================================================
 
 class QRScaleWidget(QWidget):
@@ -583,7 +637,7 @@ class QRScaleWidget(QWidget):
 
 
 # ============================================================
-# Screens
+# Screens (centered)
 # ============================================================
 
 class MainScreen(WaterBackground):
@@ -595,10 +649,7 @@ class MainScreen(WaterBackground):
         root.setContentsMargins(60, 90, 60, 70)
         root.setSpacing(16)
 
-        title = QLabel("EcoByte")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 100, QFont.Weight.Bold))
-        title.setStyleSheet("color: rgba(255,255,255,0.98);")
+        title = GradientTitleLabel("EcoByte")
 
         subtitle = QLabel("From Plastic, to Fantastic!")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -622,7 +673,7 @@ class MainScreen(WaterBackground):
         cl.addWidget(redeem_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         cl.addStretch(1)
 
-        root.addWidget(title)
+        root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(subtitle)
         root.addSpacing(10)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -715,8 +766,9 @@ class QRScreen(WaterBackground):
         root.setContentsMargins(60, 70, 60, 60)
         root.setSpacing(14)
 
-        title = QLabel("Scan to Collect EcoPoints")
+        title = QLabel("Scan to Collect\nEcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setWordWrap(True)
         title.setFont(QFont("Arial", 56, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
@@ -779,7 +831,6 @@ class RedeemScreen(WaterBackground):
 
         arrow = BouncingArrow()
 
-        # hidden input for keyboard-wedge scanner
         self._input = QLineEdit()
         self._input.setFixedSize(1, 1)
         self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
@@ -822,7 +873,7 @@ class RedeemScreen(WaterBackground):
 
 
 # ============================================================
-# Kiosk Controller (FIXED go_redeem + full flow)
+# Kiosk Controller
 # ============================================================
 
 class Kiosk(QStackedWidget):
@@ -877,7 +928,6 @@ class Kiosk(QStackedWidget):
         self.setCurrentWidget(self.deposit)
         self.reset_idle()
 
-    # ✅ FIXED: go_redeem exists now
     def go_redeem(self):
         self.worker.set_session(False)
         self.setCurrentWidget(self.redeem)
@@ -912,7 +962,6 @@ class Kiosk(QStackedWidget):
         self.reset_idle()
 
     def on_redeem_scanned(self, scanned: str):
-        # Placeholder for Firebase verify + SIM800C later
         print("REDEEM SCANNED:", scanned)
         self.redeem.set_scanned_ok()
         QTimer.singleShot(2000, self.go_main)
@@ -931,6 +980,7 @@ class Kiosk(QStackedWidget):
 # ============================================================
 
 if __name__ == "__main__":
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DisableHighDpiScaling, True)
     app = QApplication(sys.argv)
     kiosk = Kiosk()
     kiosk.show()
