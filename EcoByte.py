@@ -58,9 +58,14 @@ WAVE_SPEED = 0.085
 WAVE_OPACITY = 0.18
 
 BOTTLE_COUNT = 10
-BOTTLE_ALPHA = 42
+BOTTLE_ALPHA = 40
 BOTTLE_SPEED_MIN = 0.7
 BOTTLE_SPEED_MAX = 1.9
+
+# Title colors (requested)
+COL_ECO = "#A8FF7A"     # light green
+COL_B   = "#7BD3FF"     # light blue
+COL_YTE = "#0F5E6A"     # dark green-blue/teal
 
 
 # ============================================================
@@ -93,7 +98,7 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 
 # ============================================================
-# Animated Background: Waves + Falling PET Bottles
+# Animated Background: Waves + Falling PET bottles
 # ============================================================
 
 class _BottleParticle:
@@ -103,7 +108,7 @@ class _BottleParticle:
     def reset(self, width, height):
         self.x = random.uniform(0.08, 0.92) * width
         self.y = random.uniform(-1.0, 0.2) * height
-        self.scale = random.uniform(0.55, 1.12)
+        self.scale = random.uniform(0.60, 1.10)
         self.speed = random.uniform(BOTTLE_SPEED_MIN, BOTTLE_SPEED_MAX) * (1.0 / self.scale)
         self.sway_phase = random.uniform(0, math.tau)
         self.sway_amp = random.uniform(4, 18)
@@ -136,65 +141,81 @@ class WaterBackground(QWidget):
             self._phase = 0.0
         self.update()
 
-    # ADD: plastic (PET) bottle silhouette (slimmer neck + waist + ridges)
+    # FIX: PET bottle silhouette (short neck, wide shoulder, no glass neck)
     def _draw_pet_bottle(self, p: QPainter, cx: float, cy: float, s: float, alpha: int):
-        # PET proportions (taller + slimmer than glass silhouette)
-        H = 112 * s
-        W = 40 * s
-        neck_w = 16 * s
-        neck_h = 26 * s
-        cap_h = 7 * s
+        H = 118 * s
+        W = 46 * s
+
+        # short neck
+        neck_w = 18 * s
+        neck_h = 12 * s
+        cap_h  = 5 * s
 
         x0 = cx - W / 2
         y0 = cy - H / 2
-
-        # body with slight waist
-        path = QPainterPath()
-
-        # Top shoulder curve
-        shoulder_y = y0 + neck_h + 10*s
-        waist_y = y0 + H*0.55
-        base_y = y0 + H
-
-        left = x0
+        left  = x0
         right = x0 + W
-        mid = cx
+        mid   = cx
 
-        # neck
-        path.addRoundedRect(float(mid - neck_w/2), float(y0), float(neck_w), float(neck_h),
-                            float(6*s), float(6*s))
-        # cap
-        path.addRoundedRect(float(mid - neck_w/2), float(y0 - cap_h), float(neck_w), float(cap_h),
-                            float(3*s), float(3*s))
+        shoulder_y = y0 + neck_h + 12*s
+        waist_y    = y0 + H * 0.58
+        base_y     = y0 + H
 
-        # body outline (custom)
+        # Cap (tiny)
+        cap = QPainterPath()
+        cap.addRoundedRect(float(mid - neck_w/2), float(y0 - cap_h),
+                           float(neck_w), float(cap_h),
+                           float(3*s), float(3*s))
+
+        # Neck (short)
+        neck = QPainterPath()
+        neck.addRoundedRect(float(mid - neck_w/2), float(y0),
+                            float(neck_w), float(neck_h),
+                            float(5*s), float(5*s))
+
+        # Body with shoulders and gentle waist
         body = QPainterPath()
         body.moveTo(float(mid - neck_w/2), float(y0 + neck_h))
-        body.quadTo(float(left + W*0.18), float(y0 + neck_h + 8*s), float(left + W*0.12), float(shoulder_y))
-        body.quadTo(float(left + W*0.02), float(waist_y), float(left + W*0.10), float(base_y - 6*s))
-        body.quadTo(float(mid), float(base_y + 2*s), float(right - W*0.10), float(base_y - 6*s))
-        body.quadTo(float(right - W*0.02), float(waist_y), float(right - W*0.12), float(shoulder_y))
-        body.quadTo(float(right - W*0.18), float(y0 + neck_h + 8*s), float(mid + neck_w/2), float(y0 + neck_h))
+
+        # Left shoulder down
+        body.quadTo(float(left + W*0.20), float(y0 + neck_h + 6*s),
+                    float(left + W*0.14), float(shoulder_y))
+
+        # Left side to waist and base
+        body.quadTo(float(left + W*0.02), float(waist_y),
+                    float(left + W*0.10), float(base_y - 7*s))
+
+        # Base curve
+        body.quadTo(float(mid), float(base_y + 2*s),
+                    float(right - W*0.10), float(base_y - 7*s))
+
+        # Right side up
+        body.quadTo(float(right - W*0.02), float(waist_y),
+                    float(right - W*0.14), float(shoulder_y))
+
+        # Right shoulder to neck
+        body.quadTo(float(right - W*0.20), float(y0 + neck_h + 6*s),
+                    float(mid + neck_w/2), float(y0 + neck_h))
+
         body.closeSubpath()
 
-        # merge
-        path = path.united(body)
+        shape = cap.united(neck).united(body)
 
-        # fill (subtle plastic look)
+        # Fill
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, alpha))
-        p.drawPath(path)
+        p.drawPath(shape)
 
-        # ridges (horizontal lines)
+        # PET ridges (horizontal)
         ridge_pen = QPen(QColor(255, 255, 255, int(alpha * 0.55)), max(1, int(2*s)))
         p.setPen(ridge_pen)
-        for i in range(5):
-            ry = int(y0 + H*0.40 + i*(H*0.09))
-            lx = int(left + W*0.16)
-            rx = int(right - W*0.16)
+        for i in range(6):
+            ry = int(y0 + H*0.40 + i*(H*0.08))
+            lx = int(left + W*0.18)
+            rx = int(right - W*0.18)
             p.drawLine(lx, ry, rx, ry)
 
-        # highlight strip
+        # Highlight strip (cast to int to avoid Qt overload issues)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, int(alpha * 0.48)))
         hx = int(left + W*0.22)
@@ -211,31 +232,25 @@ class WaterBackground(QWidget):
         w = self.width()
         h = self.height()
 
-        # Gradient base
         grad = QLinearGradient(0, 0, 0, h)
         grad.setColorAt(0.0, self._top)
         grad.setColorAt(1.0, self._bottom)
         p.fillRect(self.rect(), grad)
 
-        # Top sheen
         p.fillRect(0, 0, w, int(h * 0.16), QColor(255, 255, 255, 18))
 
-        # Falling PET bottles
         for b in self._bottles:
             sway = math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp
             self._draw_pet_bottle(p, b.x + sway, b.y, 0.82 * b.scale, BOTTLE_ALPHA)
 
-        # Waves overlay
         def wave_path(y_base, amp, freq, shift):
             path = QPainterPath()
             path.moveTo(0, h)
             path.lineTo(0, y_base)
-
             step = max(8, w // 80)
             for x in range(0, w + step, step):
                 y = y_base + amp * math.sin((x * freq) + self._phase + shift)
                 path.lineTo(x, y)
-
             path.lineTo(w, h)
             path.closeSubpath()
             return path
@@ -486,14 +501,10 @@ class HardwareWorker(QThread):
 
 
 # ============================================================
-# Redeem Arrow (BIG + EDGE OVERLAY)
+# Redeem Arrow overlay (always above)
 # ============================================================
 
 class EdgeArrowOverlay(QWidget):
-    """
-    Big arrow that sits near the RIGHT EDGE of the screen, bouncing left-right.
-    This is not inside the card; it's an overlay.
-    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self._offset = 0.0
@@ -507,13 +518,13 @@ class EdgeArrowOverlay(QWidget):
         self._timer.timeout.connect(self._tick)
         self._timer.start(16)
 
-        self.resize(420, 380)
+        self.resize(520, 420)
 
     def _tick(self):
-        self._offset += 1.3 * self._dir
-        if self._offset > 24:
+        self._offset += 1.4 * self._dir
+        if self._offset > 26:
             self._dir = -1
-        elif self._offset < -10:
+        elif self._offset < -12:
             self._dir = 1
         self.update()
 
@@ -524,18 +535,19 @@ class EdgeArrowOverlay(QWidget):
         w = self.width()
         h = self.height()
 
-        # Bigger arrow
-        cx = w * 0.58 + self._offset
-        cy = h * 0.55
+        cx = w * 0.62 + self._offset
+        cy = h * 0.56
 
-        arrow_w = 360
-        arrow_h = 190
+        arrow_w = 420
+        arrow_h = 220
 
         path = QPainterPath()
         x0 = cx - arrow_w / 2
         y0 = cy - arrow_h / 2
 
-        path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25), float(arrow_w*0.62), float(arrow_h*0.50), 34, 34)
+        path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25),
+                            float(arrow_w*0.62), float(arrow_h*0.50),
+                            40, 40)
 
         head = QPainterPath()
         hx = x0 + arrow_w*0.62
@@ -546,17 +558,17 @@ class EdgeArrowOverlay(QWidget):
         path = path.united(head)
 
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 200))
+        p.setBrush(QColor(255, 255, 255, 210))
         p.drawPath(path)
 
-        pen = QPen(QColor(255, 255, 255, 110), 8)
+        pen = QPen(QColor(255, 255, 255, 120), 10)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
 
 
 # ============================================================
-# QR Widget (scale + fade)
+# QR Widget
 # ============================================================
 
 class QRScaleWidget(QWidget):
@@ -632,25 +644,32 @@ class QRScaleWidget(QWidget):
 # Screens
 # ============================================================
 
+def eco_byte_rich_title() -> str:
+    return (
+        f"<span style='color:{COL_ECO}; font-weight:900;'>Eco</span>"
+        f"<span style='color:{COL_B}; font-weight:900;'>B</span>"
+        f"<span style='color:{COL_YTE}; font-weight:900;'>yte</span>"
+    )
+
 class MainScreen(WaterBackground):
     def __init__(self, kiosk):
         super().__init__(QColor(0, 153, 170), QColor(34, 197, 94))
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(50, 50, 50, 50)
+        root.setContentsMargins(40, 40, 40, 40)
         root.setSpacing(0)
 
-        # ADD: central container so everything is truly centered
         center = QWidget()
         center_l = QVBoxLayout(center)
         center_l.setContentsMargins(0, 0, 0, 0)
         center_l.setSpacing(18)
 
-        title = QLabel("EcoByte")
+        title = QLabel()
+        title.setTextFormat(Qt.TextFormat.RichText)
+        title.setText(eco_byte_rich_title())
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("TT Hoves", 110, QFont.Weight.Black))  # ADD: bolder
-        title.setStyleSheet("color: rgba(255,255,255,0.99);")
+        title.setFont(QFont("TT Hoves", 112, QFont.Weight.Black))
 
         subtitle = QLabel("From Plastic, to Fantastic!")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -658,9 +677,9 @@ class MainScreen(WaterBackground):
         subtitle.setStyleSheet("color: rgba(255,255,255,0.86);")
 
         card = make_card()
-        card.setFixedHeight(420)
+        card.setFixedHeight(440)
         cl = QVBoxLayout(card)
-        cl.setContentsMargins(60, 52, 60, 52)
+        cl.setContentsMargins(60, 56, 60, 56)
         cl.setSpacing(18)
 
         start_btn = make_primary_button("START")
@@ -676,7 +695,7 @@ class MainScreen(WaterBackground):
 
         center_l.addWidget(title)
         center_l.addWidget(subtitle)
-        center_l.addSpacing(8)
+        center_l.addSpacing(10)
         center_l.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
 
         root.addStretch(1)
@@ -693,7 +712,7 @@ class DepositScreen(WaterBackground):
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(50, 50, 50, 50)
+        root.setContentsMargins(40, 40, 40, 40)
         root.setSpacing(10)
 
         header = QLabel("Insert Bottle")
@@ -707,7 +726,7 @@ class DepositScreen(WaterBackground):
         self.status.setStyleSheet("color: rgba(255,255,255,0.88);")
 
         card = make_card()
-        card.setFixedHeight(460)
+        card.setFixedHeight(470)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(60, 58, 60, 58)
         cl.setSpacing(10)
@@ -768,7 +787,7 @@ class QRScreen(WaterBackground):
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(50, 50, 50, 50)
+        root.setContentsMargins(40, 40, 40, 40)
         root.setSpacing(10)
 
         title = QLabel("Scan to Collect EcoPoints")
@@ -810,7 +829,7 @@ class RedeemScreen(WaterBackground):
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(50, 50, 50, 50)
+        root.setContentsMargins(40, 40, 40, 40)
         root.setSpacing(10)
 
         title = QLabel("Redeem Load")
@@ -853,20 +872,20 @@ class RedeemScreen(WaterBackground):
         root.addStretch(1)
         root.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # ADD: big arrow overlay at the RIGHT EDGE (not inside card)
         self._edge_arrow = EdgeArrowOverlay(self)
         self._edge_arrow.show()
+        self._edge_arrow.raise_()  # FIX: always above everything
 
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
         self._corner.move(0, 0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Position arrow near right edge, vertically centered-ish
-        margin = 10
+        margin = 6
         ax = self.width() - self._edge_arrow.width() - margin
-        ay = int(self.height() * 0.46 - self._edge_arrow.height() * 0.5)
+        ay = int(self.height() * 0.50 - self._edge_arrow.height() * 0.5)
         self._edge_arrow.move(ax, ay)
+        self._edge_arrow.raise_()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -888,13 +907,22 @@ class RedeemScreen(WaterBackground):
 
 
 # ============================================================
-# Kiosk Controller
+# Kiosk Controller (FIX: force true fullscreen geometry)
 # ============================================================
 
 class Kiosk(QStackedWidget):
     def __init__(self):
         super().__init__()
-        self.showFullScreen()
+
+        # FIX: true kiosk fullscreen & pinned to screen origin
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+        screen = QApplication.primaryScreen()
+        geo = screen.geometry()
+        self.setGeometry(geo)
+        self.move(0, 0)
+
         self.setCursor(Qt.CursorShape.BlankCursor)
 
         self.main = MainScreen(self)
@@ -921,6 +949,16 @@ class Kiosk(QStackedWidget):
         self.idle_timer = QTimer(self)
         self.idle_timer.timeout.connect(self.go_main)
         self.reset_idle()
+
+        # show fullscreen after geometry set
+        self.showFullScreen()
+        self.raise_()
+        self.activateWindow()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # FIX: re-pin to origin after show (prevents drift)
+        self.move(0, 0)
 
     def mousePressEvent(self, event):
         self.reset_idle()
@@ -996,10 +1034,7 @@ class Kiosk(QStackedWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    # ADD: global default font preference (TT Hoves -> fallback)
-    app.setFont(QFont("TT Hoves", 16))
+    app.setFont(QFont("TT Hoves", 16))  # fallback if not installed
 
     kiosk = Kiosk()
-    kiosk.show()
     sys.exit(app.exec())
