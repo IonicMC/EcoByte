@@ -97,7 +97,6 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 # ============================================================
 # Animated Background: Waves + Falling Bottles (NO float crash)
-# FIX 1: remove hard top sheen line -> smooth fade
 # ============================================================
 
 class _BottleParticle:
@@ -151,6 +150,7 @@ class WaterBackground(QWidget):
         y0 = cy - body_h / 2
 
         path = QPainterPath()
+        # Use QRectF-friendly overload by passing floats into addRoundedRect (OK)
         path.addRoundedRect(float(x0), float(y0 + neck_h), float(body_w), float(body_h - neck_h), float(10*s), float(10*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0), float(neck_w), float(neck_h), float(6*s), float(6*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0 - cap_h), float(neck_w), float(cap_h), float(4*s), float(4*s))
@@ -159,7 +159,7 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
-        # Highlight: cast to int for drawRoundedRect overload (fixes crash)
+        # Highlight: cast to int for drawRoundedRect overload (fixes your crash)
         hx = int(cx - body_w * 0.22)
         hy = int(y0 + neck_h + body_h * 0.08)
         hw = int(body_w * 0.14)
@@ -181,11 +181,8 @@ class WaterBackground(QWidget):
         grad.setColorAt(1.0, self._bottom)
         p.fillRect(self.rect(), grad)
 
-        # FIX 1: Soft top fade (no hard line)
-        fade = QLinearGradient(0, 0, 0, int(h * 0.28))
-        fade.setColorAt(0.0, QColor(255, 255, 255, 28))
-        fade.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.fillRect(0, 0, w, int(h * 0.28), fade)
+        # Top sheen
+        p.fillRect(0, 0, w, int(h * 0.16), QColor(255, 255, 255, 18))
 
         # Falling bottles
         for b in self._bottles:
@@ -391,7 +388,7 @@ class HardwareWorker(QThread):
         return (pulse * 34300.0) / 2.0
 
     def run(self):
-        GPIO.setwarnings(False)   # avoids “channel already in use” spam
+        GPIO.setwarnings(False)   # fixes “channel already in use” spam
         GPIO.setmode(GPIO.BCM)
 
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -454,8 +451,6 @@ class HardwareWorker(QThread):
 
 # ============================================================
 # Redeem Arrow (big → bounces left/right)
-# FIX 3: clamp so it never clips at edge
-# FIX 4: strong visible glow (multi-pass)
 # ============================================================
 
 class BouncingArrow(QWidget):
@@ -483,13 +478,11 @@ class BouncingArrow(QWidget):
         w = self.width()
         h = self.height()
 
+        cx = w * 0.74 + self._offset
+        cy = h * 0.52
+
         arrow_w = 260
         arrow_h = 140
-        margin = 60
-
-        cx = w * 0.74 + self._offset
-        cx = clamp(cx, margin + arrow_w/2, w - margin - arrow_w/2)
-        cy = h * 0.52
 
         path = QPainterPath()
         x0 = cx - arrow_w / 2
@@ -505,20 +498,13 @@ class BouncingArrow(QWidget):
         head.closeSubpath()
         path = path.united(head)
 
-        # Strong glow (multi-pass)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        for i in range(6, 0, -1):
-            alpha = 18 + i * 15
-            width = 6 + i * 4
-            p.setPen(QPen(QColor(255, 255, 255, alpha), width,
-                          Qt.PenStyle.SolidLine,
-                          Qt.PenCapStyle.RoundCap,
-                          Qt.PenJoinStyle.RoundJoin))
-            p.drawPath(path)
-
-        # Solid arrow
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 210))
+        p.setBrush(QColor(255, 255, 255, 180))
+        p.drawPath(path)
+
+        pen = QPen(QColor(255, 255, 255, 90), 6)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
 
 
@@ -727,12 +713,10 @@ class QRScreen(WaterBackground):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(60, 70, 60, 60)
-        root.setSpacing(14)  # unchanged
+        root.setSpacing(14)
 
-        # FIX 2: prevent clipping by using 2-line + wrap (visual style same)
-        title = QLabel("Scan to Collect\nEcoPoints")
+        title = QLabel("Scan to Collect EcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setWordWrap(True)
         title.setFont(QFont("Arial", 56, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
@@ -838,7 +822,7 @@ class RedeemScreen(WaterBackground):
 
 
 # ============================================================
-# Kiosk Controller (full flow)
+# Kiosk Controller (FIXED go_redeem + full flow)
 # ============================================================
 
 class Kiosk(QStackedWidget):
@@ -893,6 +877,7 @@ class Kiosk(QStackedWidget):
         self.setCurrentWidget(self.deposit)
         self.reset_idle()
 
+    # ✅ FIXED: go_redeem exists now
     def go_redeem(self):
         self.worker.set_session(False)
         self.setCurrentWidget(self.redeem)
