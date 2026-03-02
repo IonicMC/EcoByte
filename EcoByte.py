@@ -4,7 +4,7 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["QT_QPA_PLATFORMTHEME"] = ""
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
 
-# ✅ prevent IM/virtual keyboard from shifting the window on focus
+# prevent IM/virtual keyboard from shifting the window on focus
 os.environ["QT_IM_MODULE"] = "none"
 
 # Stable scaling
@@ -92,7 +92,7 @@ FIREBASE_TIMEOUT_S = 3.5
 # Theme / Font
 # ============================================================
 
-FONT_FAMILY = "TT Hoves"  # requested
+FONT_FAMILY = "TT Hoves"
 
 def try_load_tt_hoves(base_dir: str):
     fonts_dir = os.path.join(base_dir, "fonts")
@@ -109,9 +109,9 @@ def try_load_tt_hoves(base_dir: str):
         if os.path.exists(path):
             QFontDatabase.addApplicationFont(path)
 
-# More teal/light-blue gradient (you asked)
-BG_TOP = QColor(35, 175, 215)     # light teal-blue
-BG_BOTTOM = QColor(35, 215, 190)  # mint-teal
+# More teal/light-blue gradient
+BG_TOP = QColor(35, 175, 215)
+BG_BOTTOM = QColor(35, 215, 190)
 
 
 # ============================================================
@@ -144,7 +144,7 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 
 # ============================================================
-# Sound Manager (success.wav also on bottle drop)
+# Sound Manager
 # ============================================================
 
 class SoundManager:
@@ -243,7 +243,6 @@ class SoundManager:
             self.ch_ui.play(self._snd_qr_show)
 
     def success(self):
-        # ✅ lazy-load + dedicated channel + stop() to force trigger
         if not self.ok:
             return
         if self._snd_success is None:
@@ -306,7 +305,7 @@ class FirebaseClient(QObject):
 
 
 # ============================================================
-# Animated Background: Waves + Falling Bottles (PNG optional)
+# Animated Background: Waves + Falling Bottles
 # ============================================================
 
 class _BottleParticle:
@@ -631,7 +630,7 @@ def make_card() -> QWidget:
 # ============================================================
 
 class HardwareWorker(QThread):
-    ui_mode = pyqtSignal(str)   # WAITING / VERIFYING / DROPPING
+    ui_mode = pyqtSignal(str)
     dropped = pyqtSignal()
 
     def __init__(self):
@@ -1016,13 +1015,15 @@ class QRScreen(WaterBackground):
         title = QLabel("Scan to Collect EcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setFont(QFont(FONT_FAMILY, 56, QFont.Weight.Bold))
-        title.setStyleSheet("color: rgba(255,255,255,0.98);")
+        # ✅ PADDING FIX APPLIED HERE
+        title.setStyleSheet("color: rgba(255,255,255,0.98); padding-left: 30px; padding-right: 30px;")
 
         self.subtitle = QLabel("")
         self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle.setWordWrap(True)
         self.subtitle.setFont(QFont(FONT_FAMILY, 30))
-        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
+        # ✅ PADDING FIX APPLIED HERE
+        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92); padding-left: 30px; padding-right: 30px;")
         self.subtitle.setContentsMargins(20, 0, 20, 0)
 
         self.qr_widget = QRScaleWidget()
@@ -1090,7 +1091,6 @@ class RedeemScreen(WaterBackground):
         self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
         self._input.returnPressed.connect(self._on_return)
 
-        # ✅ prevent IM from shifting window
         self._input.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
         self._input.setInputMethodHints(
             Qt.InputMethodHint.ImhNoAutoUppercase |
@@ -1163,20 +1163,18 @@ class IdleEventFilter(QObject):
 
 
 # ============================================================
-# Kiosk Controller (✅ screen shift fix + success.wav on drop)
+# Kiosk Controller
 # ============================================================
 
 class Kiosk(QStackedWidget):
     def __init__(self):
         super().__init__()
 
-        # ✅ keep window stable when focus changes
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
 
-        # ✅ HARD LOCK geometry so Qt/WM cannot shift when pages change
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(screen)
         self.setFixedSize(screen.width(), screen.height())
@@ -1198,7 +1196,6 @@ class Kiosk(QStackedWidget):
         self.qr = QRScreen(self, bottle_png)
         self.redeem = RedeemScreen(self, bottle_png)
 
-        # ✅ Make every page exactly the same size as the screen (prevents sizeHint shifts)
         for page in (self.main, self.deposit, self.qr, self.redeem):
             page.setFixedSize(screen.width(), screen.height())
 
@@ -1248,13 +1245,11 @@ class Kiosk(QStackedWidget):
         self.reset_idle()
 
     def on_bottle_dropped(self):
-        # ✅ Play success sound when bottle actually drops through gate
         self.session_bottles += 1
         self.deposit.animate_counts(self.session_bottles)
 
-        # optional: keep the "bottle" sound + also success confirm
         self.snd.bottle()
-        QTimer.singleShot(40, self.snd.success)  # slight offset so they don’t clash
+        QTimer.singleShot(40, self.snd.success)
 
         self.reset_idle()
 
