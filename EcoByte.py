@@ -1015,7 +1015,7 @@ class QRScreen(WaterBackground):
         title = QLabel("Scan to Collect EcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Font size adjusted and native margins added
-        title.setFont(QFont(FONT_FAMILY, 50, QFont.Weight.Bold))
+        title.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
         title.setContentsMargins(40, 0, 40, 0)
 
