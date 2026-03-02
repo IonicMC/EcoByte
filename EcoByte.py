@@ -1012,18 +1012,22 @@ class QRScreen(WaterBackground):
         root.setContentsMargins(70, 70, 70, 60)
         root.setSpacing(12)
 
-        title = QLabel("Scan to Collect EcoPoints")
+        # ✅ FIX 1: Added a blank space inside the quotes at the beginning and end
+        title = QLabel(" Scan to Collect EcoPoints ")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(FONT_FAMILY, 56, QFont.Weight.Bold))
-        # ✅ PADDING FIX APPLIED HERE
-        title.setStyleSheet("color: rgba(255,255,255,0.98); padding-left: 30px; padding-right: 30px;")
+        
+        # ✅ FIX 2: Dropped font size slightly from 56 to 52 to ensure it fits the screen width
+        title.setFont(QFont(FONT_FAMILY, 52, QFont.Weight.Bold))
+        
+        # ✅ FIX 3: Removed the CSS padding completely
+        title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.subtitle = QLabel("")
         self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle.setWordWrap(True)
         self.subtitle.setFont(QFont(FONT_FAMILY, 30))
-        # ✅ PADDING FIX APPLIED HERE
-        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92); padding-left: 30px; padding-right: 30px;")
+        # Removed padding here too
+        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
         self.subtitle.setContentsMargins(20, 0, 20, 0)
 
         self.qr_widget = QRScaleWidget()
