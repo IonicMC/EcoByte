@@ -805,52 +805,74 @@ class BouncingArrow(QWidget):
 # QR Widget (scale+fade)
 # ============================================================
 
-# ... (Keep your QRScaleWidget exactly as it is) ...
+class QRScaleWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pm = None
+        self._scale = 0.86
 
-class QRScreen(WaterBackground):
-    def __init__(self, kiosk, bottle_png_path: str):
-        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
-        self.kiosk = kiosk
+        self._opacity = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity)
+        self._opacity.setOpacity(0.0)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 70, 70, 60)
-        root.setSpacing(12)
+        self._fade = QPropertyAnimation(self._opacity, b"opacity", self)
+        self._fade.setDuration(420)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        title = QLabel("Scan to Collect EcoPoints")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(FONT_FAMILY, 56, QFont.Weight.Bold))
-        # ✅ FIX: Added padding-left and padding-right to stop font clipping
-        title.setStyleSheet("color: rgba(255,255,255,0.98); padding-left: 30px; padding-right: 30px;")
+        self._scale_anim = QPropertyAnimation(self, b"scale", self)
+        self._scale_anim.setDuration(520)
+        self._scale_anim.setEasingCurve(QEasingCurve.Type.OutBack)
 
-        self.subtitle = QLabel("")
-        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.subtitle.setWordWrap(True)
-        self.subtitle.setFont(QFont(FONT_FAMILY, 30))
-        # ✅ FIX: Added padding here as well for safety
-        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92); padding-left: 30px; padding-right: 30px;")
-        self.subtitle.setContentsMargins(20, 0, 20, 0)
+        self.setFixedSize(720, 720)
 
-        self.qr_widget = QRScaleWidget()
+    def setPixmap(self, pm: QPixmap):
+        self._pm = pm
+        self.play()
 
-        done_btn = make_small_button("DONE")
-        done_btn.clicked.connect(self.kiosk.go_main)
-        done_btn.clicked.connect(self.kiosk.snd.tap)
+    def play(self):
+        self._fade.stop()
+        self._scale_anim.stop()
 
-        root.addStretch(1)
-        root.addWidget(title)
-        root.addWidget(self.subtitle)
-        root.addWidget(self.qr_widget, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(1)
-        root.addWidget(done_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._opacity.setOpacity(0.0)
+        self._fade.setStartValue(0.0)
+        self._fade.setEndValue(1.0)
+        self._fade.start()
 
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
+        self._scale = 0.86
+        self._scale_anim.setStartValue(0.86)
+        self._scale_anim.setEndValue(1.0)
+        self._scale_anim.start()
 
-    def set_qr(self, payload_text: str, bottles: int):
-        pts = bottles * POINTS_PER_BOTTLE
-        self.subtitle.setText(f"Bottles: {bottles}  •  EcoPoints: {pts}")
-        pm = qr_pixmap_from_text(payload_text, size_px=560)
-        self.qr_widget.setPixmap(pm)
+        self.update()
+
+    def getScale(self):
+        return self._scale
+
+    def setScale(self, v):
+        self._scale = float(v)
+        self.update()
+
+    scale = pyqtProperty(float, fget=getScale, fset=setScale)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect()
+        p.setPen(QPen(QColor(255, 255, 255, 70), 2))
+        p.setBrush(QColor(255, 255, 255, 36))
+        p.drawRoundedRect(rect.adjusted(6, 6, -6, -6), 34, 34)
+
+        if not self._pm:
+            return
+
+        base = min(rect.width(), rect.height()) - 100
+        size = int(base * self._scale)
+        x = (rect.width() - size) // 2
+        y = (rect.height() - size) // 2
+
+        pm = self._pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        p.drawPixmap(x, y, pm)
 
 
 # ============================================================
