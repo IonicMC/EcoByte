@@ -27,7 +27,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QFont, QPainter, QLinearGradient, QColor, QImage, QPixmap,
-    QPainterPath, QPen
+    QPainterPath, QPen, QFontDatabase
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
@@ -71,18 +71,57 @@ SMALL_BTN_H = 98
 
 # Background animation
 WATER_FPS_MS = 33
-WAVE_SPEED = 0.085
+WAVE_SPEED = 0.092
 WAVE_OPACITY = 0.18
 
 # Falling bottles
-BOTTLE_COUNT = 11
-BOTTLE_ALPHA = 34
+BOTTLE_COUNT = 12
+BOTTLE_ALPHA = 44
 BOTTLE_SPEED_MIN = 0.75
 BOTTLE_SPEED_MAX = 1.9
 
 # Firebase
 FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
 FIREBASE_TIMEOUT_S = 3.5
+
+
+# ============================================================
+# Theme / Font
+# ============================================================
+
+FONT_FAMILY = "TT Hoves"  # requested
+
+def try_load_tt_hoves(base_dir: str):
+    """
+    If you drop the font files here, we load them:
+    /home/rayshan/EcoByte/fonts/TT-Hoves-Regular.ttf
+    /home/rayshan/EcoByte/fonts/TT-Hoves-Bold.ttf
+    (names don't have to match exactly; we try a few common ones)
+    """
+    fonts_dir = os.path.join(base_dir, "fonts")
+    candidates = [
+        "TT-Hoves-Regular.ttf",
+        "TT-Hoves-Bold.ttf",
+        "TTHoves-Regular.ttf",
+        "TTHoves-Bold.ttf",
+        "TT Hoves Regular.ttf",
+        "TT Hoves Bold.ttf",
+    ]
+    loaded_any = False
+    for fn in candidates:
+        path = os.path.join(fonts_dir, fn)
+        if os.path.exists(path):
+            fid = QFontDatabase.addApplicationFont(path)
+            if fid != -1:
+                loaded_any = True
+    if loaded_any:
+        # If font got registered, prefer it.
+        pass
+
+
+# More teal/light-blue gradient
+BG_TOP = QColor(30, 170, 205)     # light teal-blue
+BG_BOTTOM = QColor(35, 210, 175)  # mint-teal
 
 
 # ============================================================
@@ -121,16 +160,25 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 class SoundManager:
     """
     Uses pygame mixer with bigger buffer & dedicated channels.
+    Fixes 'success.wav not playing' by:
+      - pre_init + init
+      - explicit channels
+      - graceful warnings if missing
     """
     def __init__(self, base_dir: str):
         self.ok = False
         self.base_dir = base_dir
         self.sounds_dir = os.path.join(base_dir, "sounds")
 
+        self.ch_ui = None
+        self.ch_fx = None
+
         try:
             pygame.mixer.pre_init(44100, -16, 2, 2048)
             pygame.mixer.init()
-            pygame.mixer.set_num_channels(8)
+            pygame.mixer.set_num_channels(12)
+            self.ch_ui = pygame.mixer.Channel(1)
+            self.ch_fx = pygame.mixer.Channel(2)
             self.ok = True
         except Exception as e:
             print("Sound init failed:", e)
@@ -143,24 +191,26 @@ class SoundManager:
         self.path_tap = p("tap.wav")
         self.path_bottle = p("bottle.wav")
         self.path_success = p("success.wav")
-        self.path_qr_show = p("qr_show.wav")  # ✅ NEW
+        self.path_qr_show = p("qr_show.wav")
 
-        self._snd_tap = self._load(self.path_tap)
-        self._snd_bottle = self._load(self.path_bottle)
-        self._snd_success = self._load(self.path_success)
-        self._snd_qr_show = self._load(self.path_qr_show)  # ✅ NEW
+        self._snd_tap = self._load(self.path_tap, "tap.wav")
+        self._snd_bottle = self._load(self.path_bottle, "bottle.wav")
+        self._snd_success = self._load(self.path_success, "success.wav")
+        self._snd_qr_show = self._load(self.path_qr_show, "qr_show.wav")
 
         self._idle_playing = False
         self._lock = threading.Lock()
 
-    def _load(self, path):
+    def _load(self, path, label):
         if not self.ok:
+            return None
+        if not os.path.exists(path):
+            print(f"[SOUND] missing {label}: {path}")
             return None
         try:
             return pygame.mixer.Sound(path)
         except Exception as e:
-            # Don't crash if missing; just log.
-            print("Sound load error:", path, e)
+            print(f"[SOUND] load error {label}:", e)
             return None
 
     def play_idle(self, volume=0.55):
@@ -170,6 +220,9 @@ class SoundManager:
             if self._idle_playing:
                 return
             try:
+                if not os.path.exists(self.path_idle):
+                    print("[SOUND] missing idle.wav:", self.path_idle)
+                    return
                 pygame.mixer.music.load(self.path_idle)
                 pygame.mixer.music.set_volume(volume)
                 pygame.mixer.music.play(-1)
@@ -185,24 +238,32 @@ class SoundManager:
             self._idle_playing = False
 
     def tap(self):
-        if self.ok and self._snd_tap:
+        if self.ok and self._snd_tap and self.ch_ui:
             self._snd_tap.set_volume(0.85)
-            self._snd_tap.play()
+            self.ch_ui.play(self._snd_tap)
 
     def bottle(self):
-        if self.ok and self._snd_bottle:
+        if self.ok and self._snd_bottle and self.ch_fx:
             self._snd_bottle.set_volume(0.9)
-            self._snd_bottle.play()
+            self.ch_fx.play(self._snd_bottle)
 
     def success(self):
-        if self.ok and self._snd_success:
+        # ✅ now uses a dedicated channel so it won’t get swallowed
+        if self.ok and self._snd_success and self.ch_fx:
             self._snd_success.set_volume(1.0)
-            self._snd_success.play()
+            self.ch_fx.play(self._snd_success)
+        else:
+            # helps debug if it still doesn't play
+            if not self._snd_success:
+                print("[SOUND] success.wav not loaded (check path/format).")
 
-    def qr_show(self):  # ✅ NEW
-        if self.ok and self._snd_qr_show:
+    def qr_show(self):
+        if self.ok and self._snd_qr_show and self.ch_ui:
             self._snd_qr_show.set_volume(1.0)
-            self._snd_qr_show.play()
+            self.ch_ui.play(self._snd_qr_show)
+        else:
+            if not self._snd_qr_show:
+                print("[SOUND] qr_show.wav not loaded (check path/format).")
 
 
 # ============================================================
@@ -240,10 +301,7 @@ class FirebaseClient(QObject):
                     self.ok.emit("redeem_invalid")
                     return
                 data = r.json()
-                if not data:
-                    self.ok.emit("redeem_invalid")
-                    return
-                if data.get("used") is True:
+                if not data or data.get("used") is True:
                     self.ok.emit("redeem_invalid")
                     return
 
@@ -260,7 +318,7 @@ class FirebaseClient(QObject):
 
 
 # ============================================================
-# Animated Background: Waves + Falling Bottles (plastic-y)
+# Animated Background: Waves + Falling Bottles (PNG w/ ridges)
 # ============================================================
 
 class _BottleParticle:
@@ -276,13 +334,19 @@ class _BottleParticle:
         self.sway_amp = random.uniform(4, 16)
 
 class WaterBackground(QWidget):
-    def __init__(self, top: QColor, bottom: QColor, parent=None):
+    def __init__(self, top: QColor, bottom: QColor, asset_bottle_png: str = "", parent=None):
         super().__init__(parent)
         self._top = top
         self._bottom = bottom
         self._phase = 0.0
 
         self._bottles = [_BottleParticle() for _ in range(BOTTLE_COUNT)]
+
+        self._bottle_pm = None
+        if asset_bottle_png and os.path.exists(asset_bottle_png):
+            pm = QPixmap(asset_bottle_png)
+            if not pm.isNull():
+                self._bottle_pm = pm
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -295,19 +359,20 @@ class WaterBackground(QWidget):
 
         for b in self._bottles:
             b.y += b.speed * 2.0
-            if b.y > h + 160:
+            if b.y > h + 170:
                 b.reset(w, h)
-                b.y = -160
+                b.y = -170
 
         if self._phase > 1e9:
             self._phase = 0.0
         self.update()
 
-    def _draw_bottle(self, p: QPainter, cx: float, cy: float, s: float, alpha: int):
-        body_w = 44 * s
-        body_h = 88 * s
+    def _draw_ridged_vector_bottle(self, p: QPainter, cx: float, cy: float, s: float, alpha: int):
+        # Short neck “plastic bottle” + ridges
+        body_w = 46 * s
+        body_h = 90 * s
         neck_w = 22 * s
-        neck_h = 14 * s   # short neck
+        neck_h = 14 * s
         cap_h  = 6  * s
 
         x0 = cx - body_w / 2
@@ -322,13 +387,23 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
+        # highlight
         hx = int(cx - body_w * 0.22)
-        hy = int(y0 + neck_h + body_h * 0.10)
+        hy = int(y0 + neck_h + body_h * 0.12)
         hw = int(body_w * 0.14)
-        hh = int(body_h * 0.64)
+        hh = int(body_h * 0.60)
         rr = int(max(2, 7 * s))
-        p.setBrush(QColor(255, 255, 255, int(alpha * 0.60)))
+        p.setBrush(QColor(255, 255, 255, int(alpha * 0.55)))
         p.drawRoundedRect(hx, hy, hw, hh, rr, rr)
+
+        # ridges (horizontal soft lines)
+        pen = QPen(QColor(255, 255, 255, int(alpha * 0.55)), max(1, int(2 * s)))
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        start_y = y0 + neck_h + (body_h * 0.22)
+        for i in range(5):
+            yy = start_y + i * (body_h * 0.10)
+            p.drawLine(int(x0 + body_w * 0.14), int(yy), int(x0 + body_w * 0.86), int(yy))
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -347,9 +422,26 @@ class WaterBackground(QWidget):
         fade.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.fillRect(0, 0, w, int(h * 0.24), fade)
 
+        # Falling bottles (PNG preferred)
         for b in self._bottles:
             sway = math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp
-            self._draw_bottle(p, b.x + sway, b.y, 0.88 * b.scale, BOTTLE_ALPHA)
+            cx = b.x + sway
+            cy = b.y
+            s = 0.9 * b.scale
+
+            if self._bottle_pm:
+                target_h = int(120 * s)
+                target_w = int(60 * s)
+                pm = self._bottle_pm.scaled(
+                    target_w, target_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                p.setOpacity(BOTTLE_ALPHA / 255.0)
+                p.drawPixmap(int(cx - pm.width()/2), int(cy - pm.height()/2), pm)
+                p.setOpacity(1.0)
+            else:
+                self._draw_ridged_vector_bottle(p, cx, cy, s, BOTTLE_ALPHA)
 
         def wave_path(y_base, amp, freq, shift):
             path = QPainterPath()
@@ -439,23 +531,22 @@ class AnimatedNumberLabel(QLabel):
 
 
 # ============================================================
-# Colored EcoByte title widget (Eco green, B light blue, yte teal)
+# Colored EcoByte title widget
 # ============================================================
 
 class ColoredEcoByteTitle(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(200)
+        self.setFixedHeight(220)
 
     def sizeHint(self):
-        return QSize(980, 200)
+        return QSize(980, 220)
 
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        # ✅ Bigger title
-        font = QFont("Arial", 122, QFont.Weight.Bold)
+        font = QFont(FONT_FAMILY, 122, QFont.Weight.Bold)
         p.setFont(font)
         fm = p.fontMetrics()
 
@@ -466,7 +557,6 @@ class ColoredEcoByteTitle(QWidget):
         x = (self.width() - total) // 2
         y = (self.height() + fm.ascent() - fm.descent()) // 2
 
-        # subtle shadow
         def draw_part(text, x_pos, color):
             path = QPainterPath()
             path.addText(float(x_pos), float(y), font, text)
@@ -480,10 +570,9 @@ class ColoredEcoByteTitle(QWidget):
             p.setBrush(color)
             p.drawPath(path)
 
-        # Colors you asked
-        eco_color = QColor(80, 240, 120)     # bright green
-        b_color   = QColor(90, 190, 255)     # light blue
-        yte_color = QColor(10, 155, 165)     # dark green-blue (teal)
+        eco_color = QColor(80, 240, 120)
+        b_color   = QColor(90, 190, 255)
+        yte_color = QColor(10, 155, 165)
 
         draw_part("Eco", x, eco_color)
         x += widths[0]
@@ -499,7 +588,7 @@ class ColoredEcoByteTitle(QWidget):
 def make_primary_button(text: str) -> QPushButton:
     b = QPushButton(text)
     b.setFixedSize(BTN_W, BTN_H)
-    b.setFont(QFont("Arial", 26, QFont.Weight.Bold))
+    b.setFont(QFont(FONT_FAMILY, 26, QFont.Weight.Bold))
     b.setStyleSheet("""
         QPushButton {
             background: rgba(255,255,255,0.18);
@@ -515,7 +604,7 @@ def make_primary_button(text: str) -> QPushButton:
 def make_secondary_button(text: str) -> QPushButton:
     b = QPushButton(text)
     b.setFixedSize(BTN_W, BTN_H)
-    b.setFont(QFont("Arial", 24, QFont.Weight.Bold))
+    b.setFont(QFont(FONT_FAMILY, 24, QFont.Weight.Bold))
     b.setStyleSheet("""
         QPushButton {
             background: rgba(255,255,255,0.94);
@@ -530,7 +619,7 @@ def make_secondary_button(text: str) -> QPushButton:
 def make_small_button(text: str) -> QPushButton:
     b = QPushButton(text)
     b.setFixedSize(SMALL_BTN_W, SMALL_BTN_H)
-    b.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+    b.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
     b.setStyleSheet("""
         QPushButton {
             background: rgba(255,255,255,0.94);
@@ -693,7 +782,7 @@ class BouncingArrow(QWidget):
         w = self.width()
         h = self.height()
 
-        cx = w * 0.72 + self._offset
+        cx = w * 0.70 + self._offset
         cy = h * 0.53
 
         arrow_w = 260
@@ -713,7 +802,7 @@ class BouncingArrow(QWidget):
         head.closeSubpath()
         path = path.united(head)
 
-        glow_pen = QPen(QColor(255, 255, 255, 80), 18)
+        glow_pen = QPen(QColor(255, 255, 255, 70), 20)
         p.setPen(glow_pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
@@ -722,7 +811,7 @@ class BouncingArrow(QWidget):
         p.setBrush(QColor(255, 255, 255, 190))
         p.drawPath(path)
 
-        edge_pen = QPen(QColor(255, 255, 255, 130), 6)
+        edge_pen = QPen(QColor(255, 255, 255, 140), 6)
         p.setPen(edge_pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
@@ -807,23 +896,25 @@ class QRScaleWidget(QWidget):
 # ============================================================
 
 class MainScreen(WaterBackground):
-    def __init__(self, kiosk):
-        super().__init__(QColor(0, 153, 170), QColor(34, 197, 94))
+    def __init__(self, kiosk, bottle_png_path: str):
+        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 80, 60, 70)
+        # more top padding so nothing gets clipped
+        root.setContentsMargins(70, 95, 70, 70)
         root.setSpacing(14)
 
         title = ColoredEcoByteTitle()
 
         subtitle = QLabel("From Plastic, to Fantastic!")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setFont(QFont("Arial", 28))
-        subtitle.setStyleSheet("color: rgba(255,255,255,0.86);")
+        subtitle.setFont(QFont(FONT_FAMILY, 28))
+        subtitle.setStyleSheet("color: rgba(255,255,255,0.88);")
 
         card = make_card()
-        card.setFixedHeight(390)
+        card.setFixedHeight(410)
+        card.setFixedWidth(860)  # helps centering and consistent layout
         cl = QVBoxLayout(card)
         cl.setContentsMargins(56, 44, 56, 44)
         cl.setSpacing(18)
@@ -854,38 +945,39 @@ class MainScreen(WaterBackground):
 
 
 class DepositScreen(WaterBackground):
-    def __init__(self, kiosk):
-        super().__init__(QColor(0, 153, 170), QColor(34, 197, 94))
+    def __init__(self, kiosk, bottle_png_path: str):
+        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 70, 60, 50)
+        root.setContentsMargins(70, 85, 70, 65)
         root.setSpacing(14)
 
         header = QLabel("Insert Bottle")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setFont(QFont("Arial", 68, QFont.Weight.Bold))
+        header.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
         header.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.status = QLabel("Waiting for bottle…")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setFont(QFont("Arial", 34))
-        self.status.setStyleSheet("color: rgba(255,255,255,0.88);")
+        self.status.setFont(QFont(FONT_FAMILY, 34))
+        self.status.setStyleSheet("color: rgba(255,255,255,0.90);")
 
         card = make_card()
-        card.setFixedHeight(450)
+        card.setFixedHeight(470)
+        card.setFixedWidth(860)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(56, 54, 56, 54)
         cl.setSpacing(10)
 
         self.bottles_lbl = AnimatedNumberLabel("Bottles: ")
         self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bottles_lbl.setFont(QFont("Arial", 58, QFont.Weight.Bold))
+        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 58, QFont.Weight.Bold))
         self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.points_lbl = AnimatedNumberLabel("EcoPoints: ")
         self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.points_lbl.setFont(QFont("Arial", 52, QFont.Weight.Bold))
+        self.points_lbl.setFont(QFont(FONT_FAMILY, 52, QFont.Weight.Bold))
         self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);")
 
         cl.addStretch(1)
@@ -932,24 +1024,26 @@ class DepositScreen(WaterBackground):
 
 
 class QRScreen(WaterBackground):
-    def __init__(self, kiosk):
-        super().__init__(QColor(0, 153, 170), QColor(34, 197, 94))
+    def __init__(self, kiosk, bottle_png_path: str):
+        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 60, 60, 50)
+        root.setContentsMargins(70, 70, 70, 60)
         root.setSpacing(12)
 
         title = QLabel("Scan to Collect EcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 56, QFont.Weight.Bold))
+        title.setFont(QFont(FONT_FAMILY, 56, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.subtitle = QLabel("")
         self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle.setWordWrap(True)
-        self.subtitle.setFont(QFont("Arial", 30))
-        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.90);")
+        self.subtitle.setFont(QFont(FONT_FAMILY, 30))
+        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
+        # Prevent corner clipping by giving it some breathing room
+        self.subtitle.setContentsMargins(20, 0, 20, 0)
 
         self.qr_widget = QRScaleWidget()
 
@@ -977,33 +1071,36 @@ class QRScreen(WaterBackground):
 class RedeemScreen(WaterBackground):
     scanned_text = pyqtSignal(str)
 
-    def __init__(self, kiosk):
-        super().__init__(QColor(0, 153, 170), QColor(34, 197, 94))
+    def __init__(self, kiosk, bottle_png_path: str):
+        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 70, 60, 50)
+        root.setContentsMargins(70, 85, 70, 60)
         root.setSpacing(12)
 
         title = QLabel("Redeem Load")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 68, QFont.Weight.Bold))
+        title.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         card = make_card()
-        card.setFixedHeight(600)
+        card.setFixedHeight(620)
+        card.setFixedWidth(860)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(56, 52, 56, 52)
         cl.setSpacing(12)
 
         instr = QLabel("Show your Redeem QR Code\non the EcoByte MIT App\nthen scan it on the RIGHT.")
         instr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        instr.setFont(QFont("Arial", 34))
+        instr.setWordWrap(True)
+        instr.setFont(QFont(FONT_FAMILY, 34))
         instr.setStyleSheet("color: rgba(255,255,255,0.92);")
+        instr.setContentsMargins(18, 0, 18, 0)
 
         self.status = QLabel("Scanner ready…")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setFont(QFont("Arial", 26))
+        self.status.setFont(QFont(FONT_FAMILY, 26))
         self.status.setStyleSheet("color: rgba(255,255,255,0.82);")
 
         arrow = BouncingArrow()
@@ -1013,16 +1110,20 @@ class RedeemScreen(WaterBackground):
         self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
         self._input.returnPressed.connect(self._on_return)
 
+        cl.addStretch(1)
         cl.addWidget(instr)
         cl.addSpacing(6)
         cl.addWidget(arrow)
         cl.addWidget(self.status)
         cl.addWidget(self._input, alignment=Qt.AlignmentFlag.AlignLeft)
+        cl.addStretch(1)
 
         back_btn = make_small_button("BACK")
         back_btn.clicked.connect(self.kiosk.go_main)
         back_btn.clicked.connect(self.kiosk.snd.tap)
 
+        # ✅ true centering: stretch above and below, card centered
+        root.addStretch(1)
         root.addWidget(title)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addStretch(1)
@@ -1084,17 +1185,22 @@ class Kiosk(QStackedWidget):
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
 
-        self.snd = SoundManager(os.path.dirname(os.path.abspath(__file__)))
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        try_load_tt_hoves(base_dir)
+
+        self.snd = SoundManager(base_dir)
         self.snd.play_idle()
 
         self.fb = FirebaseClient(FIREBASE_URL)
         self.fb.log.connect(lambda s: print("[Firebase]", s))
         self.fb.ok.connect(self._on_firebase_ok)
 
-        self.main = MainScreen(self)
-        self.deposit = DepositScreen(self)
-        self.qr = QRScreen(self)
-        self.redeem = RedeemScreen(self)
+        bottle_png = os.path.join(base_dir, "assets", "bottle.png")
+
+        self.main = MainScreen(self, bottle_png)
+        self.deposit = DepositScreen(self, bottle_png)
+        self.qr = QRScreen(self, bottle_png)
+        self.redeem = RedeemScreen(self, bottle_png)
 
         self.addWidget(self.main)
         self.addWidget(self.deposit)
@@ -1168,20 +1274,14 @@ class Kiosk(QStackedWidget):
         }
         payload_text = json.dumps(payload, separators=(",", ":"))
 
-        # Show QR immediately
         self.qr.set_qr(payload_text, bottles)
         self.setCurrentWidget(self.qr)
 
-        # ✅ Play the "QR appears" sound AFTER screen switch
+        # QR appear sound
         QTimer.singleShot(80, self.snd.qr_show)
 
         self.reset_idle()
-
-        # Save to Firebase async
         self.fb.create_deposit_token_async(token_id, payload)
-
-        # optional success chime too (keep if you want)
-        # self.snd.success()
 
     def on_redeem_scanned(self, scanned: str):
         self.reset_idle()
@@ -1209,6 +1309,7 @@ class Kiosk(QStackedWidget):
 
         if msg == "redeem_ok":
             self.redeem.set_scanned_ok()
+            # ✅ success sound should now reliably play
             self.snd.success()
             QTimer.singleShot(1800, self.go_main)
             return
@@ -1237,6 +1338,12 @@ class Kiosk(QStackedWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # Set global default font to TT Hoves (fallback if missing)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    try_load_tt_hoves(base_dir)
+    app.setFont(QFont(FONT_FAMILY, 18))
+
     kiosk = Kiosk()
     kiosk.show()
     sys.exit(app.exec())
