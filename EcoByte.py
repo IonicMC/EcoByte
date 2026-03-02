@@ -1,7 +1,29 @@
+#!/usr/bin/env python3
+# ============================================================
+# EcoByte Kiosk (PyQt6) - Single-file build
+# Raspberry Pi 4 + 15.6" touchscreen (vertical 1080x1920)
+#
+# Fixes included (per your last messages):
+# ✅ Idle music DOES NOT stop when pressing buttons
+# ✅ Insert Bottle screen re-centered (not too low)
+# ✅ “Scan to Collect EcoPoints” title centered + not clipped
+# ✅ Bottle/EcoPoints labels no longer clipped by rounded card edges
+# ✅ Falling bottles redesigned to look more “plastic-y” (no long neck + ridges)
+# ✅ “Line slicing through gradient” removed (top sheen is now a fade gradient)
+# ✅ Success.wav plays when bottle is DROPPED (after gate cycle) + also on drop confirm
+# ✅ Secret top-left corner tap 5x to exit restored
+#
+# Notes:
+# - Audio uses pygame (works best on Pi without QtMultimedia)
+# - Your WAV files should be in the SAME folder as EcoByte.py:
+#   idle.wav, click.wav, qr_show.wav, success.wav
+# ============================================================
+
 import os
-# --- Qt on Raspberry Pi (avoid Wayland theme/plugin issues) ---
-os.environ["QT_QPA_PLATFORM"] = "xcb"
-os.environ["QT_QPA_PLATFORMTHEME"] = ""
+
+# ---- Platform / Theme hardening for Pi desktops ----
+os.environ["QT_QPA_PLATFORM"] = "xcb"            # avoids wayland plugin errors
+os.environ["QT_QPA_PLATFORMTHEME"] = ""          # avoids qt6ct spam
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
 
 import sys
@@ -10,15 +32,18 @@ import uuid
 import json
 import math
 import random
+from dataclasses import dataclass
 
 import RPi.GPIO as GPIO
 import qrcode
 
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+    Qt, QTimer, QThread, pyqtSignal, pyqtProperty,
+    QPropertyAnimation, QEasingCurve, QRectF
 )
 from PyQt6.QtGui import (
-    QFont, QPainter, QLinearGradient, QColor, QImage, QPixmap, QPainterPath, QPen
+    QFont, QPainter, QLinearGradient, QColor, QImage, QPixmap,
+    QPainterPath, QPen
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
@@ -26,58 +51,62 @@ from PyQt6.QtWidgets import (
     QGraphicsOpacityEffect, QLineEdit
 )
 
-# --- Audio (no PyQt6.QtMultimedia needed) ---
-import pygame
-
-
 # ============================================================
 # CONFIG
 # ============================================================
 
+# --- Idle behavior ---
 IDLE_TIMEOUT_MS = 15000
 
-GPIO_CAP = 17
-GPIO_TRIG = 23
-GPIO_ECHO = 24
+# --- GPIO wiring (BCM) ---
+GPIO_CAP   = 17
+GPIO_TRIG  = 23
+GPIO_ECHO  = 24
 GPIO_SERVO = 16
 
+# --- Ultrasonic threshold ---
 DIST_THRESHOLD_CM = 10.0
+
+# --- Sensor verify delay (you wanted 2 seconds) ---
 VERIFY_SECONDS = 2.0
 POLL_MS = 30
 
+# --- Servo positions ---
 SERVO_CLOSED_DEG = 0
-SERVO_OPEN_DEG = 90
-GATE_OPEN_MS = 900
+SERVO_OPEN_DEG   = 90
+GATE_OPEN_MS     = 900
 
+# --- Points ---
 POINTS_PER_BOTTLE = 5
 
-# UI sizing
+# --- UI sizing ---
 BTN_W = 600
 BTN_H = 124
 SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
-# Background animation
+# --- Water animation ---
 WATER_FPS_MS = 33           # ~30fps
-WAVE_SPEED = 0.075
+WAVE_SPEED   = 0.085        # a bit faster than before
 WAVE_OPACITY = 0.18
 
-# Falling bottles
+# --- Falling bottles ---
 BOTTLE_COUNT = 10
-BOTTLE_ALPHA = 38
-BOTTLE_SPEED_MIN = 0.7
-BOTTLE_SPEED_MAX = 1.8
+BOTTLE_ALPHA = 42
+BOTTLE_SPEED_MIN = 0.75
+BOTTLE_SPEED_MAX = 1.95
 
-# Sound files (put them in /home/rayshan/EcoByte/sounds/ OR same folder as EcoByte.py)
-SOUNDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
-SND_IDLE = "idle.wav"
-SND_CLICK = "click.wav"
-SND_QR_SHOW = "qr_show.wav"
-SND_SUCCESS = "success.wav"
+# --- Fonts ---
+FONT_UI = "TT Hoves"  # will fallback if not installed
 
+# --- Audio files (must be in same directory as EcoByte.py) ---
+AUDIO_IDLE    = "idle.wav"
+AUDIO_CLICK   = "click.wav"
+AUDIO_QR_SHOW = "qr_show.wav"
+AUDIO_SUCCESS = "success.wav"
 
 # ============================================================
-# Helpers
+# Small helpers
 # ============================================================
 
 def clamp(x, lo, hi):
@@ -86,13 +115,6 @@ def clamp(x, lo, hi):
 def angle_to_duty(angle_deg: float) -> float:
     a = clamp(angle_deg, 0, 180)
     return 2.5 + (a / 180.0) * 10.0
-
-def _sound_path(name: str) -> str:
-    p1 = os.path.join(SOUNDS_DIR, name)
-    if os.path.isfile(p1):
-        return p1
-    p2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
-    return p2
 
 def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
     qr = qrcode.QRCode(
@@ -105,91 +127,120 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     img = img.resize((size_px, size_px))
+
     w, h = img.size
     data = img.tobytes("raw", "RGB")
     qimg = QImage(data, w, h, 3 * w, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimg)
 
-def set_font_tthoves(lbl: QLabel, px: int, bold: bool = False):
-    f = QFont("TT Hoves")
-    f.setPixelSize(px)
-    if bold:
-        f.setWeight(QFont.Weight.Bold)
-    lbl.setFont(f)
-
+def file_path_here(name: str) -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, name)
 
 # ============================================================
-# Audio Manager (pygame)
+# AUDIO (pygame)
 # ============================================================
 
-class Audio:
+class AudioManager:
+    """
+    Simple pygame mixer-based audio:
+    - One looping idle channel
+    - One SFX channel (plays over idle)
+    """
     def __init__(self):
         self.ok = False
-        self.idle_channel = None
-        self.sfx_channel = None
-        self._idle_loaded = None
+        self._idle_chan = None
+        self._sfx_chan = None
+        self._idle_sound = None
+        self._click_sound = None
+        self._qr_sound = None
+        self._success_sound = None
 
         try:
-            # Smaller buffer can reduce latency; too small can crackle.
-            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=1024)
+            import pygame
+            self.pygame = pygame
+            # pre_init helps reduce crackle/jitter on Pi
+            pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
             pygame.init()
             pygame.mixer.init()
+            self._idle_chan = pygame.mixer.Channel(0)
+            self._sfx_chan = pygame.mixer.Channel(1)
+
+            # Load sounds
+            self._idle_sound    = pygame.mixer.Sound(file_path_here(AUDIO_IDLE))
+            self._click_sound   = pygame.mixer.Sound(file_path_here(AUDIO_CLICK))
+            self._qr_sound      = pygame.mixer.Sound(file_path_here(AUDIO_QR_SHOW))
+            self._success_sound = pygame.mixer.Sound(file_path_here(AUDIO_SUCCESS))
+
+            # volumes (tweak if you want)
+            self._idle_sound.set_volume(0.35)
+            self._click_sound.set_volume(0.55)
+            self._qr_sound.set_volume(0.70)
+            self._success_sound.set_volume(0.85)
+
             self.ok = True
-            self.idle_channel = pygame.mixer.Channel(0)
-            self.sfx_channel = pygame.mixer.Channel(1)
         except Exception as e:
-            print("Audio init failed:", e)
+            print("Audio disabled:", e)
             self.ok = False
 
-    def play_idle(self):
+    def start_idle(self):
         if not self.ok:
             return
         try:
-            path = _sound_path(SND_IDLE)
-            if not os.path.isfile(path):
+            # if already playing, do nothing
+            if self._idle_chan.get_busy():
                 return
-            if self._idle_loaded != path:
-                self._idle_loaded = path
-                self._idle_sound = pygame.mixer.Sound(path)
-            if not self.idle_channel.get_busy():
-                self.idle_channel.play(self._idle_sound, loops=-1)
+            self._idle_chan.play(self._idle_sound, loops=-1)
         except Exception as e:
-            print("Idle play error:", e)
+            print("idle play failed:", e)
 
-    def stop_idle(self):
+    def stop_all(self):
         if not self.ok:
             return
         try:
-            self.idle_channel.stop()
+            self._idle_chan.stop()
+            self._sfx_chan.stop()
         except Exception:
             pass
 
-    def sfx(self, name: str, volume: float = 1.0):
-        if not self.ok:
+    def click(self):
+        self.play_sfx(self._click_sound)
+
+    def qr_show(self):
+        self.play_sfx(self._qr_sound)
+
+    def success(self):
+        self.play_sfx(self._success_sound)
+
+    def play_sfx(self, snd):
+        if not self.ok or snd is None:
             return
         try:
-            path = _sound_path(name)
-            if not os.path.isfile(path):
-                return
-            s = pygame.mixer.Sound(path)
-            s.set_volume(clamp(volume, 0.0, 1.0))
-            self.sfx_channel.play(s)
+            # keep idle running; just play sfx on separate channel
+            self._sfx_chan.play(snd)
         except Exception as e:
-            print("SFX error:", e)
-
+            print("sfx failed:", e)
 
 # ============================================================
-# Animated Background: Waves + Falling Bottles
+# Animated Background: Waves + Falling "Plastic" Bottles
+#   - Fix for “horizontal slicing line”:
+#     The old top sheen used a hard rectangle edge.
+#     Now we use a fade gradient overlay instead.
 # ============================================================
 
+@dataclass
 class _BottleParticle:
-    def __init__(self):
-        self.reset(1080, 1920)
+    x: float = 0
+    y: float = 0
+    scale: float = 1
+    speed: float = 1
+    sway_phase: float = 0
+    sway_amp: float = 0
 
     def reset(self, width, height):
         self.x = random.uniform(0.08, 0.92) * width
         self.y = random.uniform(-1.0, 0.2) * height
-        self.scale = random.uniform(0.6, 1.15)
+        self.scale = random.uniform(0.65, 1.15)
         self.speed = random.uniform(BOTTLE_SPEED_MIN, BOTTLE_SPEED_MAX) * (1.0 / self.scale)
         self.sway_phase = random.uniform(0, math.tau)
         self.sway_amp = random.uniform(4, 18)
@@ -200,7 +251,9 @@ class WaterBackground(QWidget):
         self._top = top
         self._bottom = bottom
         self._phase = 0.0
-        self._bottles = [_BottleParticle() for _ in range(BOTTLE_COUNT)]
+        self._bottles = [ _BottleParticle() for _ in range(BOTTLE_COUNT) ]
+        for b in self._bottles:
+            b.reset(1080, 1920)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -213,50 +266,55 @@ class WaterBackground(QWidget):
 
         for b in self._bottles:
             b.y += b.speed * 2.0
-            if b.y > h + 140:
+            if b.y > h + 160:
                 b.reset(w, h)
-                b.y = -140
+                b.y = -160
 
         if self._phase > 1e9:
             self._phase = 0.0
         self.update()
 
+    # --- Plastic bottle silhouette with ridges (no long neck) ---
     def _draw_bottle(self, p: QPainter, cx: float, cy: float, s: float, alpha: int):
-        """
-        Shorter neck + "ridges" to avoid the 'glass bottle' look.
-        """
-        body_w = 44 * s
-        body_h = 82 * s
-        neck_w = 20 * s
-        neck_h = 16 * s   # shorter neck
-        cap_h  = 7 * s
+        body_w = 46 * s
+        body_h = 92 * s
 
         x0 = cx - body_w / 2
         y0 = cy - body_h / 2
 
         path = QPainterPath()
-        path.addRoundedRect(float(x0), float(y0 + neck_h), float(body_w), float(body_h - neck_h), float(12*s), float(12*s))
-        path.addRoundedRect(float(cx - neck_w/2), float(y0), float(neck_w), float(neck_h), float(7*s), float(7*s))
-        path.addRoundedRect(float(cx - neck_w/2), float(y0 - cap_h), float(neck_w), float(cap_h), float(4*s), float(4*s))
+        path.addRoundedRect(float(x0), float(y0), float(body_w), float(body_h),
+                            float(16*s), float(16*s))
+
+        # shoulder dent (subtract) to feel PET-like
+        shoulder = QPainterPath()
+        shoulder.addRoundedRect(
+            float(cx - body_w*0.36),
+            float(y0 + body_h*0.08),
+            float(body_w*0.72),
+            float(body_h*0.12),
+            float(10*s), float(10*s)
+        )
+        path = path.subtracted(shoulder)
 
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
-        # highlight strip
-        hx = int(cx - body_w * 0.25)
-        hy = int(y0 + neck_h + body_h * 0.10)
-        hw = int(body_w * 0.12)
-        hh = int(body_h * 0.68)
-        rr = int(max(2, 6 * s))
+        # highlight stripe
+        hx = int(cx - body_w * 0.20)
+        hy = int(y0 + body_h * 0.12)
+        hw = int(body_w * 0.10)
+        hh = int(body_h * 0.70)
+        rr = int(max(2, 8 * s))
         p.setBrush(QColor(255, 255, 255, int(alpha * 0.55)))
         p.drawRoundedRect(hx, hy, hw, hh, rr, rr)
 
-        # ridges (subtle horizontal lines)
+        # ridges
         pen = QPen(QColor(255, 255, 255, int(alpha * 0.55)), max(1, int(2*s)))
         p.setPen(pen)
-        for i in range(3):
-            yy = int(y0 + neck_h + (body_h * (0.30 + i*0.18)))
+        for i in range(4):
+            yy = int(y0 + body_h * (0.30 + i*0.14))
             xL = int(x0 + body_w * 0.18)
             xR = int(x0 + body_w * 0.82)
             p.drawLine(xL, yy, xR, yy)
@@ -268,17 +326,25 @@ class WaterBackground(QWidget):
         w = self.width()
         h = self.height()
 
+        # base gradient (lean teal/light-blue)
         grad = QLinearGradient(0, 0, 0, h)
         grad.setColorAt(0.0, self._top)
         grad.setColorAt(1.0, self._bottom)
         p.fillRect(self.rect(), grad)
 
-        p.fillRect(0, 0, w, int(h * 0.16), QColor(255, 255, 255, 18))
+        # ✅ FIX: "slicing line" removed by using a fade overlay instead of a hard-edge rectangle
+        sheen = QLinearGradient(0, 0, 0, int(h * 0.30))
+        sheen.setColorAt(0.00, QColor(255, 255, 255, 26))
+        sheen.setColorAt(0.40, QColor(255, 255, 255, 10))
+        sheen.setColorAt(1.00, QColor(255, 255, 255, 0))
+        p.fillRect(QRectF(0, 0, w, h * 0.30), sheen)
 
+        # falling bottles
         for b in self._bottles:
             sway = math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp
-            self._draw_bottle(p, b.x + sway, b.y, 0.85 * b.scale, BOTTLE_ALPHA)
+            self._draw_bottle(p, b.x + sway, b.y, 0.90 * b.scale, BOTTLE_ALPHA)
 
+        # wave overlay paths
         def wave_path(y_base, amp, freq, shift):
             path = QPainterPath()
             path.moveTo(0, h)
@@ -301,7 +367,6 @@ class WaterBackground(QWidget):
         p.drawPath(wave_path(int(h * 0.70), 28, 0.016, 0.0))
         p.setBrush(c2)
         p.drawPath(wave_path(int(h * 0.78), 18, 0.020, 1.4))
-
 
 # ============================================================
 # Secret Exit Corner (tap 5x)
@@ -331,7 +396,6 @@ class SecretExitCorner(QPushButton):
     def _reset(self):
         self._count = 0
         self._timer.stop()
-
 
 # ============================================================
 # Animated number label
@@ -365,7 +429,6 @@ class AnimatedNumberLabel(QLabel):
         self._anim.setEndValue(float(target))
         self._anim.start()
 
-
 # ============================================================
 # Button styling
 # ============================================================
@@ -373,10 +436,7 @@ class AnimatedNumberLabel(QLabel):
 def make_primary_button(text: str) -> QPushButton:
     b = QPushButton(text)
     b.setFixedSize(BTN_W, BTN_H)
-    f = QFont("TT Hoves")
-    f.setPixelSize(48)
-    f.setWeight(QFont.Weight.Bold)
-    b.setFont(f)
+    b.setFont(QFont(FONT_UI, 26, QFont.Weight.Bold))
     b.setStyleSheet("""
         QPushButton {
             background: rgba(255,255,255,0.18);
@@ -392,10 +452,7 @@ def make_primary_button(text: str) -> QPushButton:
 def make_secondary_button(text: str) -> QPushButton:
     b = QPushButton(text)
     b.setFixedSize(BTN_W, BTN_H)
-    f = QFont("TT Hoves")
-    f.setPixelSize(44)
-    f.setWeight(QFont.Weight.Bold)
-    b.setFont(f)
+    b.setFont(QFont(FONT_UI, 24, QFont.Weight.Bold))
     b.setStyleSheet("""
         QPushButton {
             background: rgba(255,255,255,0.94);
@@ -410,10 +467,7 @@ def make_secondary_button(text: str) -> QPushButton:
 def make_small_button(text: str) -> QPushButton:
     b = QPushButton(text)
     b.setFixedSize(SMALL_BTN_W, SMALL_BTN_H)
-    f = QFont("TT Hoves")
-    f.setPixelSize(30)
-    f.setWeight(QFont.Weight.Bold)
-    b.setFont(f)
+    b.setFont(QFont(FONT_UI, 18, QFont.Weight.Bold))
     b.setStyleSheet("""
         QPushButton {
             background: rgba(255,255,255,0.94);
@@ -435,9 +489,8 @@ def make_card() -> QWidget:
     """)
     return c
 
-
 # ============================================================
-# Hardware Worker (cap+ultra latch -> delay -> gate)
+# Hardware Worker (cap + ultrasonic latch -> 2s verify -> gate)
 # ============================================================
 
 class HardwareWorker(QThread):
@@ -546,9 +599,8 @@ class HardwareWorker(QThread):
                 pass
             GPIO.cleanup()
 
-
 # ============================================================
-# Redeem Arrow (glow + bounce)
+# Redeem Arrow with glow (bounces left/right)
 # ============================================================
 
 class BouncingArrow(QWidget):
@@ -556,19 +608,17 @@ class BouncingArrow(QWidget):
         super().__init__(parent)
         self._offset = 0.0
         self._dir = 1
-        self._glow_phase = 0.0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(16)
-        self.setFixedHeight(240)
+        self.setFixedSize(720, 240)  # plenty of room so it won't clip
 
     def _tick(self):
-        self._offset += 1.15 * self._dir
-        if self._offset > 22:
+        self._offset += 1.2 * self._dir
+        if self._offset > 24:
             self._dir = -1
-        elif self._offset < -6:
+        elif self._offset < -8:
             self._dir = 1
-        self._glow_phase += 0.06
         self.update()
 
     def paintEvent(self, event):
@@ -578,17 +628,19 @@ class BouncingArrow(QWidget):
         w = self.width()
         h = self.height()
 
-        cx = w * 0.70 + self._offset
+        cx = w * 0.64 + self._offset
         cy = h * 0.52
 
-        arrow_w = 260
-        arrow_h = 140
+        arrow_w = 300
+        arrow_h = 150
 
         path = QPainterPath()
         x0 = cx - arrow_w / 2
         y0 = cy - arrow_h / 2
 
-        path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25), float(arrow_w*0.62), float(arrow_h*0.50), 24, 24)
+        path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25),
+                            float(arrow_w*0.62), float(arrow_h*0.50),
+                            26, 26)
 
         head = QPainterPath()
         hx = x0 + arrow_w*0.62
@@ -596,26 +648,24 @@ class BouncingArrow(QWidget):
         head.lineTo(float(x0 + arrow_w), float(cy))
         head.lineTo(float(hx), float(y0 + arrow_h))
         head.closeSubpath()
+
         path = path.united(head)
 
-        # glow
-        glow = 120 + int(70 * (0.5 + 0.5*math.sin(self._glow_phase)))
-        for k, a in enumerate([glow, glow-25, glow-45]):
-            pen = QPen(QColor(255, 255, 255, max(0, a)), 18 - k*5)
-            p.setPen(pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
+        # glow (multiple strokes)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for i, a in [(18, 28), (14, 42), (10, 58), (7, 74)]:
+            p.setPen(QPen(QColor(255, 255, 255, a), i))
             p.drawPath(path)
 
-        # solid
+        # solid fill
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, 190))
         p.drawPath(path)
 
-        pen = QPen(QColor(255, 255, 255, 120), 6)
-        p.setPen(pen)
+        # crisp outline
+        p.setPen(QPen(QColor(255, 255, 255, 110), 4))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
-
 
 # ============================================================
 # QR Widget (scale+fade animation)
@@ -687,71 +737,39 @@ class QRScaleWidget(QWidget):
         x = (rect.width() - size) // 2
         y = (rect.height() - size) // 2
 
-        pm = self._pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        pm = self._pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
         p.drawPixmap(x, y, pm)
-
 
 # ============================================================
 # Screens
 # ============================================================
 
-class EcoByteTitleWidget(QWidget):
-    """
-    Custom painted title: Eco (bright green) + B (light blue) + yte (blue-green/dark teal)
-    """
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(150)
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        w = self.width()
-        text = "EcoByte"
-
-        font = QFont("TT Hoves")
-        font.setPixelSize(112)
-        font.setWeight(QFont.Weight.Bold)
-        p.setFont(font)
-
-        fm = p.fontMetrics()
-        tw = fm.horizontalAdvance(text)
-        th = fm.height()
-        x = (w - tw) // 2
-        y = (self.height() + th) // 2 - fm.descent()
-
-        # draw segments
-        eco = "Eco"
-        b = "B"
-        yte = "yte"
-
-        x0 = x
-        p.setPen(QColor(80, 220, 120))     # bright green
-        p.drawText(int(x0), int(y), eco)
-
-        x1 = x0 + fm.horizontalAdvance(eco)
-        p.setPen(QColor(140, 210, 255))    # light blue
-        p.drawText(int(x1), int(y), b)
-
-        x2 = x1 + fm.horizontalAdvance(b)
-        p.setPen(QColor(30, 140, 155))     # dark green-blue
-        p.drawText(int(x2), int(y), yte)
-
-
 class MainScreen(WaterBackground):
     def __init__(self, kiosk):
-        super().__init__(QColor(18, 170, 205), QColor(40, 215, 145))
+        # teal -> green-ish
+        super().__init__(QColor(0, 170, 210), QColor(34, 197, 94))
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 80, 60, 70)
-        root.setSpacing(14)
+        root.setContentsMargins(60, 90, 60, 70)
+        root.setSpacing(16)
 
-        title = EcoByteTitleWidget()
+        # --- EcoByte title with colored parts ---
+        title = QLabel()
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setTextFormat(Qt.TextFormat.RichText)
+        title.setText(
+            "<span style='font-weight:800; font-size:96px;'>"
+            "<span style='color:#4ADE80;'>Eco</span>"
+            "<span style='color:#7DD3FC;'>B</span>"
+            "<span style='color:#0F766E;'>yte</span>"
+            "</span>"
+        )
+
         subtitle = QLabel("From Plastic, to Fantastic!")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(subtitle, 34, False)
+        subtitle.setFont(QFont(FONT_UI, 26))
         subtitle.setStyleSheet("color: rgba(255,255,255,0.86);")
 
         card = make_card()
@@ -766,57 +784,59 @@ class MainScreen(WaterBackground):
         start_btn.clicked.connect(self.kiosk.start_session)
         redeem_btn.clicked.connect(self.kiosk.go_redeem)
 
+        # click sound
+        start_btn.clicked.connect(self.kiosk.audio.click)
+        redeem_btn.clicked.connect(self.kiosk.audio.click)
+
         cl.addStretch(1)
         cl.addWidget(start_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(redeem_btn, alignment=Qt.AlignmentFlag.AlignCenter)
         cl.addStretch(1)
 
-        # Center the whole block better (use stretches)
-        root.addStretch(2)
         root.addWidget(title)
         root.addWidget(subtitle)
         root.addSpacing(10)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(3)
+        root.addStretch(1)
 
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
         self._corner.move(0, 0)
 
-
 class DepositScreen(WaterBackground):
     def __init__(self, kiosk):
-        super().__init__(QColor(18, 170, 205), QColor(40, 215, 145))
+        super().__init__(QColor(0, 170, 210), QColor(34, 197, 94))
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 60, 60, 60)
+        root.setContentsMargins(60, 70, 60, 60)  # slightly higher than before
         root.setSpacing(12)
 
         header = QLabel("Insert Bottle")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(header, 84, True)
+        header.setFont(QFont(FONT_UI, 74, QFont.Weight.Bold))
         header.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.status = QLabel("Waiting for bottle…")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(self.status, 40, False)
+        self.status.setFont(QFont(FONT_UI, 30))
         self.status.setStyleSheet("color: rgba(255,255,255,0.88);")
 
         card = make_card()
         card.setFixedHeight(430)
         cl = QVBoxLayout(card)
-        cl.setContentsMargins(56, 54, 56, 54)
-        cl.setSpacing(10)
+        # ✅ more padding prevents clipping into rounded edges
+        cl.setContentsMargins(68, 60, 68, 60)
+        cl.setSpacing(14)
 
         self.bottles_lbl = AnimatedNumberLabel("Bottles: ")
         self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(self.bottles_lbl, 72, True)
-        self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
+        self.bottles_lbl.setFont(QFont(FONT_UI, 58, QFont.Weight.Bold))
+        self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98); padding: 12px 18px;")
 
         self.points_lbl = AnimatedNumberLabel("EcoPoints: ")
         self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(self.points_lbl, 66, True)
-        self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);")
+        self.points_lbl.setFont(QFont(FONT_UI, 52, QFont.Weight.Bold))
+        self.points_lbl.setStyleSheet("color: rgba(232,255,242,1); padding: 12px 18px;")
 
         cl.addStretch(1)
         cl.addWidget(self.bottles_lbl)
@@ -825,22 +845,26 @@ class DepositScreen(WaterBackground):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(18)
+
         back_btn = make_small_button("BACK")
         finish_btn = make_small_button("FINISH")
+
         back_btn.clicked.connect(self.kiosk.go_main)
         finish_btn.clicked.connect(self.kiosk.finish_session)
+        back_btn.clicked.connect(self.kiosk.audio.click)
+        finish_btn.clicked.connect(self.kiosk.audio.click)
 
         btn_row.addStretch(1)
         btn_row.addWidget(back_btn)
         btn_row.addWidget(finish_btn)
         btn_row.addStretch(1)
 
-        # ✅ FIX: Center the whole content block vertically
-        root.addStretch(3)
+        # ✅ Centered, not too low:
+        root.addStretch(1)
         root.addWidget(header)
         root.addWidget(self.status)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(2)
+        root.addStretch(1)
         root.addLayout(btn_row)
 
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
@@ -858,35 +882,33 @@ class DepositScreen(WaterBackground):
         self.bottles_lbl.animate_to(bottles)
         self.points_lbl.animate_to(bottles * POINTS_PER_BOTTLE)
 
-
 class QRScreen(WaterBackground):
     def __init__(self, kiosk):
-        super().__init__(QColor(18, 170, 205), QColor(40, 215, 145))
+        super().__init__(QColor(0, 170, 210), QColor(34, 197, 94))
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 60, 60, 60)
-        root.setSpacing(10)
+        root.setContentsMargins(60, 70, 60, 60)
+        root.setSpacing(12)
 
-        # ✅ FIX: Make sure it never clips/cuts: wordWrap + slightly smaller + extra top space
         title = QLabel("Scan to Collect EcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setWordWrap(True)
-        set_font_tthoves(title, 62, True)
+        title.setFont(QFont(FONT_UI, 54, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.subtitle = QLabel("")
         self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(self.subtitle, 34, False)
+        self.subtitle.setFont(QFont(FONT_UI, 30))
         self.subtitle.setStyleSheet("color: rgba(255,255,255,0.90);")
 
         self.qr_widget = QRScaleWidget()
         done_btn = make_small_button("DONE")
         done_btn.clicked.connect(self.kiosk.go_main)
+        done_btn.clicked.connect(self.kiosk.audio.click)
 
-        root.addStretch(1)
-        root.addWidget(title)
-        root.addWidget(self.subtitle)
+        root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.subtitle, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self.qr_widget, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addStretch(1)
         root.addWidget(done_btn, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -900,57 +922,57 @@ class QRScreen(WaterBackground):
         pm = qr_pixmap_from_text(payload_text, size_px=560)
         self.qr_widget.setPixmap(pm)
 
-
 class RedeemScreen(WaterBackground):
     scanned_text = pyqtSignal(str)
 
     def __init__(self, kiosk):
-        super().__init__(QColor(18, 170, 205), QColor(40, 215, 145))
+        super().__init__(QColor(0, 170, 210), QColor(34, 197, 94))
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(60, 60, 60, 60)
-        root.setSpacing(12)
+        root.setContentsMargins(60, 80, 60, 60)
+        root.setSpacing(14)
 
         title = QLabel("Redeem Load")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(title, 76, True)
+        title.setFont(QFont(FONT_UI, 68, QFont.Weight.Bold))
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         card = make_card()
         card.setFixedHeight(580)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(56, 56, 56, 56)
-        cl.setSpacing(10)
+        cl.setSpacing(12)
 
         instr = QLabel("Show your Redeem QR Code\non the EcoByte MIT App\nthen scan it on the RIGHT.")
         instr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(instr, 40, True)
+        instr.setFont(QFont(FONT_UI, 34))
         instr.setStyleSheet("color: rgba(255,255,255,0.92);")
 
         self.status = QLabel("Scanner ready…")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        set_font_tthoves(self.status, 30, False)
+        self.status.setFont(QFont(FONT_UI, 24))
         self.status.setStyleSheet("color: rgba(255,255,255,0.80);")
 
         arrow = BouncingArrow()
 
+        # hidden input for keyboard-wedge scanner
         self._input = QLineEdit()
         self._input.setFixedSize(1, 1)
         self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
         self._input.returnPressed.connect(self._on_return)
 
-        cl.addWidget(instr)
+        cl.addWidget(instr, alignment=Qt.AlignmentFlag.AlignCenter)
         cl.addSpacing(6)
         cl.addWidget(arrow, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addWidget(self.status)
+        cl.addWidget(self.status, alignment=Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(self._input, alignment=Qt.AlignmentFlag.AlignLeft)
 
         back_btn = make_small_button("BACK")
         back_btn.clicked.connect(self.kiosk.go_main)
+        back_btn.clicked.connect(self.kiosk.audio.click)
 
-        root.addStretch(1)
-        root.addWidget(title)
+        root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addStretch(1)
         root.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -976,7 +998,6 @@ class RedeemScreen(WaterBackground):
     def set_scanned_ok(self):
         self.status.setText("SCANNED ✓")
 
-
 # ============================================================
 # Kiosk Controller
 # ============================================================
@@ -984,13 +1005,11 @@ class RedeemScreen(WaterBackground):
 class Kiosk(QStackedWidget):
     def __init__(self):
         super().__init__()
-        self.setObjectName("KioskStack")
-        self.setStyleSheet("#KioskStack { background: transparent; }")
+
+        self.audio = AudioManager()
 
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
-
-        self.audio = Audio()
 
         self.main = MainScreen(self)
         self.deposit = DepositScreen(self)
@@ -1017,13 +1036,11 @@ class Kiosk(QStackedWidget):
         self.idle_timer.timeout.connect(self.go_main)
         self.reset_idle()
 
-        # Start idle music
-        self.audio.play_idle()
+        # ✅ Start idle music and keep it running
+        self.audio.start_idle()
 
     def mousePressEvent(self, event):
         self.reset_idle()
-        # click sfx (optional)
-        self.audio.sfx(SND_CLICK, 0.65)
         super().mousePressEvent(event)
 
     def reset_idle(self):
@@ -1035,25 +1052,25 @@ class Kiosk(QStackedWidget):
         self.deposit.animate_counts(0)
         self.setCurrentWidget(self.main)
         self.reset_idle()
-        self.audio.play_idle()
+        # ✅ keep idle music running (do NOT stop)
 
     def start_session(self):
-        self.audio.stop_idle()
         self.session_bottles = 0
         self.deposit.animate_counts(0)
         self.worker.set_session(True)
         self.setCurrentWidget(self.deposit)
         self.reset_idle()
+        # ✅ keep idle music running
 
     def go_redeem(self):
         self.worker.set_session(False)
-        self.audio.stop_idle()
         self.setCurrentWidget(self.redeem)
         self.reset_idle()
+        # ✅ keep idle music running
 
     def on_bottle_dropped(self):
-        # ✅ play success as soon as bottle is dropped through chute
-        self.audio.sfx(SND_SUCCESS, 1.0)
+        # ✅ Play success when the chute drop finishes
+        self.audio.success()
 
         self.session_bottles += 1
         self.deposit.animate_counts(self.session_bottles)
@@ -1082,14 +1099,14 @@ class Kiosk(QStackedWidget):
         self.setCurrentWidget(self.qr)
         self.reset_idle()
 
-        # QR show sound
-        self.audio.sfx(SND_QR_SHOW, 0.95)
+        # ✅ Play QR show sound here (works reliably)
+        self.audio.qr_show()
 
     def on_redeem_scanned(self, scanned: str):
+        # placeholder for Firebase verify + SIM800C later
         print("REDEEM SCANNED:", scanned)
         self.redeem.set_scanned_ok()
-        # success sound here too (optional)
-        self.audio.sfx(SND_SUCCESS, 0.95)
+        self.audio.success()
         QTimer.singleShot(2000, self.go_main)
 
     def exit_app(self):
@@ -1099,11 +1116,10 @@ class Kiosk(QStackedWidget):
         except Exception:
             pass
         try:
-            self.audio.stop_idle()
+            self.audio.stop_all()
         except Exception:
             pass
         QApplication.instance().quit()
-
 
 # ============================================================
 # Run
