@@ -878,131 +878,6 @@ class QRScaleWidget(QWidget):
 # Screens
 # ============================================================
 
-class MainScreen(WaterBackground):
-    def __init__(self, kiosk, bottle_png_path: str):
-        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
-        self.kiosk = kiosk
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 95, 70, 70)
-        root.setSpacing(14)
-
-        title = ColoredEcoByteTitle()
-
-        subtitle = QLabel("From Plastic, to Fantastic!")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setFont(QFont(FONT_FAMILY, 28))
-        subtitle.setStyleSheet("color: rgba(255,255,255,0.88);")
-
-        card = make_card()
-        card.setFixedHeight(410)
-        card.setFixedWidth(860)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(56, 44, 56, 44)
-        cl.setSpacing(18)
-
-        start_btn = make_primary_button("START")
-        redeem_btn = make_secondary_button("REDEEM LOAD")
-
-        start_btn.clicked.connect(self.kiosk.start_session)
-        redeem_btn.clicked.connect(self.kiosk.go_redeem)
-        start_btn.clicked.connect(self.kiosk.snd.tap)
-        redeem_btn.clicked.connect(self.kiosk.snd.tap)
-
-        cl.addStretch(1)
-        cl.addWidget(start_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addWidget(redeem_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addStretch(1)
-
-        root.addStretch(2)
-        root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(subtitle)
-        root.addSpacing(10)
-        root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(3)
-
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
-
-
-class DepositScreen(WaterBackground):
-    def __init__(self, kiosk, bottle_png_path: str):
-        super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
-        self.kiosk = kiosk
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 85, 70, 65)
-        root.setSpacing(14)
-
-        header = QLabel("Insert Bottle")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
-        header.setStyleSheet("color: rgba(255,255,255,0.98);")
-
-        self.status = QLabel("Waiting for bottle…")
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setFont(QFont(FONT_FAMILY, 34))
-        self.status.setStyleSheet("color: rgba(255,255,255,0.90);")
-
-        card = make_card()
-        card.setFixedHeight(470)
-        card.setFixedWidth(860)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(56, 54, 56, 54)
-        cl.setSpacing(10)
-
-        self.bottles_lbl = AnimatedNumberLabel("Bottles: ")
-        self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 58, QFont.Weight.Bold))
-        self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
-
-        self.points_lbl = AnimatedNumberLabel("EcoPoints: ")
-        self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.points_lbl.setFont(QFont(FONT_FAMILY, 52, QFont.Weight.Bold))
-        self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);")
-
-        cl.addStretch(1)
-        cl.addWidget(self.bottles_lbl)
-        cl.addWidget(self.points_lbl)
-        cl.addStretch(1)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(18)
-        back_btn = make_small_button("BACK")
-        finish_btn = make_small_button("FINISH")
-
-        back_btn.clicked.connect(self.kiosk.go_main)
-        finish_btn.clicked.connect(self.kiosk.finish_session)
-        back_btn.clicked.connect(self.kiosk.snd.tap)
-        finish_btn.clicked.connect(self.kiosk.snd.tap)
-
-        btn_row.addStretch(1)
-        btn_row.addWidget(back_btn)
-        btn_row.addWidget(finish_btn)
-        btn_row.addStretch(1)
-
-        root.addWidget(header)
-        root.addWidget(self.status)
-        root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(1)
-        root.addLayout(btn_row)
-
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
-
-    def set_mode(self, mode: str):
-        if mode == "WAITING":
-            self.status.setText("Waiting for bottle…")
-        elif mode == "VERIFYING":
-            self.status.setText("Confirming… Please wait")
-        elif mode == "DROPPING":
-            self.status.setText("Processing…")
-
-    def animate_counts(self, bottles: int):
-        self.bottles_lbl.animate_to(bottles)
-        self.points_lbl.animate_to(bottles * POINTS_PER_BOTTLE)
-
-
 class QRScreen(WaterBackground):
     def __init__(self, kiosk, bottle_png_path: str):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
@@ -1012,23 +887,23 @@ class QRScreen(WaterBackground):
         root.setContentsMargins(70, 70, 70, 60)
         root.setSpacing(12)
 
-        # ✅ FIX 1: Added a blank space inside the quotes at the beginning and end
-        title = QLabel(" Scan to Collect EcoPoints ")
+        # Removed the fake spaces in the string
+        title = QLabel("Scan to Collect EcoPoints")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        # ✅ FIX 2: Dropped font size slightly from 56 to 52 to ensure it fits the screen width
-        title.setFont(QFont(FONT_FAMILY, 52, QFont.Weight.Bold))
-        
-        # ✅ FIX 3: Removed the CSS padding completely
+        # Dropped size to 50 to guarantee width fit
+        title.setFont(QFont(FONT_FAMILY, 50, QFont.Weight.Bold))
+        # Removed CSS padding
         title.setStyleSheet("color: rgba(255,255,255,0.98);")
+        # ✅ FIX: Using PyQt native margins to expand the drawing box (Left: 40, Right: 40)
+        title.setContentsMargins(40, 0, 40, 0)
 
         self.subtitle = QLabel("")
         self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle.setWordWrap(True)
         self.subtitle.setFont(QFont(FONT_FAMILY, 30))
-        # Removed padding here too
         self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
-        self.subtitle.setContentsMargins(20, 0, 20, 0)
+        # Increased native margins here as well just to be safe
+        self.subtitle.setContentsMargins(40, 0, 40, 0)
 
         self.qr_widget = QRScaleWidget()
 
@@ -1051,7 +926,6 @@ class QRScreen(WaterBackground):
         self.subtitle.setText(f"Bottles: {bottles}  •  EcoPoints: {pts}")
         pm = qr_pixmap_from_text(payload_text, size_px=560)
         self.qr_widget.setPixmap(pm)
-
 
 class RedeemScreen(WaterBackground):
     scanned_text = pyqtSignal(str)
