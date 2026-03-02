@@ -104,15 +104,10 @@ def try_load_tt_hoves(base_dir: str):
         "TT Hoves Regular.ttf",
         "TT Hoves Bold.ttf",
     ]
-    loaded_any = False
     for fn in candidates:
         path = os.path.join(fonts_dir, fn)
         if os.path.exists(path):
-            fid = QFontDatabase.addApplicationFont(path)
-            if fid != -1:
-                loaded_any = True
-    if loaded_any:
-        pass
+            QFontDatabase.addApplicationFont(path)
 
 # More teal/light-blue gradient (you asked)
 BG_TOP = QColor(35, 175, 215)     # light teal-blue
@@ -149,7 +144,7 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 
 # ============================================================
-# Sound Manager (fix success.wav not playing)
+# Sound Manager (success.wav also on bottle drop)
 # ============================================================
 
 class SoundManager:
@@ -168,7 +163,7 @@ class SoundManager:
             pygame.mixer.set_num_channels(16)
             self.ch_ui = pygame.mixer.Channel(1)
             self.ch_fx = pygame.mixer.Channel(2)
-            self.ch_success = pygame.mixer.Channel(3)  # ✅ dedicated
+            self.ch_success = pygame.mixer.Channel(3)
             self.ok = True
         except Exception as e:
             print("Sound init failed:", e)
@@ -246,8 +241,6 @@ class SoundManager:
             self._snd_qr_show.set_volume(1.0)
             self.ch_ui.stop()
             self.ch_ui.play(self._snd_qr_show)
-        else:
-            print("[SOUND] qr_show.wav not loaded (check path/format).")
 
     def success(self):
         # ✅ lazy-load + dedicated channel + stop() to force trigger
@@ -259,8 +252,6 @@ class SoundManager:
             self._snd_success.set_volume(1.0)
             self.ch_success.stop()
             self.ch_success.play(self._snd_success)
-        else:
-            print("[SOUND] success.wav not loaded (check path/format).")
 
 
 # ============================================================
@@ -916,7 +907,6 @@ class MainScreen(WaterBackground):
 
         start_btn.clicked.connect(self.kiosk.start_session)
         redeem_btn.clicked.connect(self.kiosk.go_redeem)
-
         start_btn.clicked.connect(self.kiosk.snd.tap)
         redeem_btn.clicked.connect(self.kiosk.snd.tap)
 
@@ -984,7 +974,6 @@ class DepositScreen(WaterBackground):
 
         back_btn.clicked.connect(self.kiosk.go_main)
         finish_btn.clicked.connect(self.kiosk.finish_session)
-
         back_btn.clicked.connect(self.kiosk.snd.tap)
         finish_btn.clicked.connect(self.kiosk.snd.tap)
 
@@ -1096,13 +1085,12 @@ class RedeemScreen(WaterBackground):
 
         arrow = BouncingArrow()
 
-        # hidden input for keyboard-wedge scanner
         self._input = QLineEdit()
         self._input.setFixedSize(2, 2)
         self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
         self._input.returnPressed.connect(self._on_return)
 
-        # ✅ prevent input-method/keyboard from resizing/shifting the window
+        # ✅ prevent IM from shifting window
         self._input.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
         self._input.setInputMethodHints(
             Qt.InputMethodHint.ImhNoAutoUppercase |
@@ -1175,7 +1163,7 @@ class IdleEventFilter(QObject):
 
 
 # ============================================================
-# Kiosk Controller
+# Kiosk Controller (✅ screen shift fix + success.wav on drop)
 # ============================================================
 
 class Kiosk(QStackedWidget):
@@ -1187,6 +1175,11 @@ class Kiosk(QStackedWidget):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
+
+        # ✅ HARD LOCK geometry so Qt/WM cannot shift when pages change
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+        self.setFixedSize(screen.width(), screen.height())
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         try_load_tt_hoves(base_dir)
@@ -1204,6 +1197,10 @@ class Kiosk(QStackedWidget):
         self.deposit = DepositScreen(self, bottle_png)
         self.qr = QRScreen(self, bottle_png)
         self.redeem = RedeemScreen(self, bottle_png)
+
+        # ✅ Make every page exactly the same size as the screen (prevents sizeHint shifts)
+        for page in (self.main, self.deposit, self.qr, self.redeem):
+            page.setFixedSize(screen.width(), screen.height())
 
         self.addWidget(self.main)
         self.addWidget(self.deposit)
@@ -1251,9 +1248,14 @@ class Kiosk(QStackedWidget):
         self.reset_idle()
 
     def on_bottle_dropped(self):
+        # ✅ Play success sound when bottle actually drops through gate
         self.session_bottles += 1
         self.deposit.animate_counts(self.session_bottles)
+
+        # optional: keep the "bottle" sound + also success confirm
         self.snd.bottle()
+        QTimer.singleShot(40, self.snd.success)  # slight offset so they don’t clash
+
         self.reset_idle()
 
     def finish_session(self):
