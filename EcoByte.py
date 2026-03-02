@@ -4,6 +4,9 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["QT_QPA_PLATFORMTHEME"] = ""
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
 
+# ✅ prevent IM/virtual keyboard from shifting the window on focus
+os.environ["QT_IM_MODULE"] = "none"
+
 # Stable scaling
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
 os.environ["QT_SCALE_FACTOR"] = "1"
@@ -92,12 +95,6 @@ FIREBASE_TIMEOUT_S = 3.5
 FONT_FAMILY = "TT Hoves"  # requested
 
 def try_load_tt_hoves(base_dir: str):
-    """
-    If you drop the font files here, we load them:
-    /home/rayshan/EcoByte/fonts/TT-Hoves-Regular.ttf
-    /home/rayshan/EcoByte/fonts/TT-Hoves-Bold.ttf
-    (names don't have to match exactly; we try a few common ones)
-    """
     fonts_dir = os.path.join(base_dir, "fonts")
     candidates = [
         "TT-Hoves-Regular.ttf",
@@ -115,13 +112,11 @@ def try_load_tt_hoves(base_dir: str):
             if fid != -1:
                 loaded_any = True
     if loaded_any:
-        # If font got registered, prefer it.
         pass
 
-
-# More teal/light-blue gradient
-BG_TOP = QColor(30, 170, 205)     # light teal-blue
-BG_BOTTOM = QColor(35, 210, 175)  # mint-teal
+# More teal/light-blue gradient (you asked)
+BG_TOP = QColor(35, 175, 215)     # light teal-blue
+BG_BOTTOM = QColor(35, 215, 190)  # mint-teal
 
 
 # ============================================================
@@ -154,17 +149,10 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
 
 
 # ============================================================
-# Sound Manager
+# Sound Manager (fix success.wav not playing)
 # ============================================================
 
 class SoundManager:
-    """
-    Uses pygame mixer with bigger buffer & dedicated channels.
-    Fixes 'success.wav not playing' by:
-      - pre_init + init
-      - explicit channels
-      - graceful warnings if missing
-    """
     def __init__(self, base_dir: str):
         self.ok = False
         self.base_dir = base_dir
@@ -172,13 +160,15 @@ class SoundManager:
 
         self.ch_ui = None
         self.ch_fx = None
+        self.ch_success = None
 
         try:
             pygame.mixer.pre_init(44100, -16, 2, 2048)
             pygame.mixer.init()
-            pygame.mixer.set_num_channels(12)
+            pygame.mixer.set_num_channels(16)
             self.ch_ui = pygame.mixer.Channel(1)
             self.ch_fx = pygame.mixer.Channel(2)
+            self.ch_success = pygame.mixer.Channel(3)  # ✅ dedicated
             self.ok = True
         except Exception as e:
             print("Sound init failed:", e)
@@ -247,23 +237,30 @@ class SoundManager:
             self._snd_bottle.set_volume(0.9)
             self.ch_fx.play(self._snd_bottle)
 
-    def success(self):
-        # ✅ now uses a dedicated channel so it won’t get swallowed
-        if self.ok and self._snd_success and self.ch_fx:
-            self._snd_success.set_volume(1.0)
-            self.ch_fx.play(self._snd_success)
-        else:
-            # helps debug if it still doesn't play
-            if not self._snd_success:
-                print("[SOUND] success.wav not loaded (check path/format).")
-
     def qr_show(self):
-        if self.ok and self._snd_qr_show and self.ch_ui:
+        if not self.ok:
+            return
+        if self._snd_qr_show is None:
+            self._snd_qr_show = self._load(self.path_qr_show, "qr_show.wav")
+        if self._snd_qr_show and self.ch_ui:
             self._snd_qr_show.set_volume(1.0)
+            self.ch_ui.stop()
             self.ch_ui.play(self._snd_qr_show)
         else:
-            if not self._snd_qr_show:
-                print("[SOUND] qr_show.wav not loaded (check path/format).")
+            print("[SOUND] qr_show.wav not loaded (check path/format).")
+
+    def success(self):
+        # ✅ lazy-load + dedicated channel + stop() to force trigger
+        if not self.ok:
+            return
+        if self._snd_success is None:
+            self._snd_success = self._load(self.path_success, "success.wav")
+        if self._snd_success and self.ch_success:
+            self._snd_success.set_volume(1.0)
+            self.ch_success.stop()
+            self.ch_success.play(self._snd_success)
+        else:
+            print("[SOUND] success.wav not loaded (check path/format).")
 
 
 # ============================================================
@@ -318,7 +315,7 @@ class FirebaseClient(QObject):
 
 
 # ============================================================
-# Animated Background: Waves + Falling Bottles (PNG w/ ridges)
+# Animated Background: Waves + Falling Bottles (PNG optional)
 # ============================================================
 
 class _BottleParticle:
@@ -368,7 +365,6 @@ class WaterBackground(QWidget):
         self.update()
 
     def _draw_ridged_vector_bottle(self, p: QPainter, cx: float, cy: float, s: float, alpha: int):
-        # Short neck “plastic bottle” + ridges
         body_w = 46 * s
         body_h = 90 * s
         neck_w = 22 * s
@@ -387,7 +383,6 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
-        # highlight
         hx = int(cx - body_w * 0.22)
         hy = int(y0 + neck_h + body_h * 0.12)
         hw = int(body_w * 0.14)
@@ -396,7 +391,6 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, int(alpha * 0.55)))
         p.drawRoundedRect(hx, hy, hw, hh, rr, rr)
 
-        # ridges (horizontal soft lines)
         pen = QPen(QColor(255, 255, 255, int(alpha * 0.55)), max(1, int(2 * s)))
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -422,7 +416,6 @@ class WaterBackground(QWidget):
         fade.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.fillRect(0, 0, w, int(h * 0.24), fade)
 
-        # Falling bottles (PNG preferred)
         for b in self._bottles:
             sway = math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp
             cx = b.x + sway
@@ -901,7 +894,6 @@ class MainScreen(WaterBackground):
         self.kiosk = kiosk
 
         root = QVBoxLayout(self)
-        # more top padding so nothing gets clipped
         root.setContentsMargins(70, 95, 70, 70)
         root.setSpacing(14)
 
@@ -914,7 +906,7 @@ class MainScreen(WaterBackground):
 
         card = make_card()
         card.setFixedHeight(410)
-        card.setFixedWidth(860)  # helps centering and consistent layout
+        card.setFixedWidth(860)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(56, 44, 56, 44)
         cl.setSpacing(18)
@@ -1042,7 +1034,6 @@ class QRScreen(WaterBackground):
         self.subtitle.setWordWrap(True)
         self.subtitle.setFont(QFont(FONT_FAMILY, 30))
         self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
-        # Prevent corner clipping by giving it some breathing room
         self.subtitle.setContentsMargins(20, 0, 20, 0)
 
         self.qr_widget = QRScaleWidget()
@@ -1105,10 +1096,19 @@ class RedeemScreen(WaterBackground):
 
         arrow = BouncingArrow()
 
+        # hidden input for keyboard-wedge scanner
         self._input = QLineEdit()
         self._input.setFixedSize(2, 2)
         self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
         self._input.returnPressed.connect(self._on_return)
+
+        # ✅ prevent input-method/keyboard from resizing/shifting the window
+        self._input.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+        self._input.setInputMethodHints(
+            Qt.InputMethodHint.ImhNoAutoUppercase |
+            Qt.InputMethodHint.ImhNoPredictiveText |
+            Qt.InputMethodHint.ImhHiddenText
+        )
 
         cl.addStretch(1)
         cl.addWidget(instr)
@@ -1122,7 +1122,6 @@ class RedeemScreen(WaterBackground):
         back_btn.clicked.connect(self.kiosk.go_main)
         back_btn.clicked.connect(self.kiosk.snd.tap)
 
-        # ✅ true centering: stretch above and below, card centered
         root.addStretch(1)
         root.addWidget(title)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -1182,6 +1181,10 @@ class IdleEventFilter(QObject):
 class Kiosk(QStackedWidget):
     def __init__(self):
         super().__init__()
+
+        # ✅ keep window stable when focus changes
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
 
@@ -1209,7 +1212,6 @@ class Kiosk(QStackedWidget):
         self.setCurrentWidget(self.main)
 
         self.session_bottles = 0
-        self._pending_redeem_token = None
 
         self.worker = HardwareWorker()
         self.worker.ui_mode.connect(self.deposit.set_mode)
@@ -1276,8 +1278,6 @@ class Kiosk(QStackedWidget):
 
         self.qr.set_qr(payload_text, bottles)
         self.setCurrentWidget(self.qr)
-
-        # QR appear sound
         QTimer.singleShot(80, self.snd.qr_show)
 
         self.reset_idle()
@@ -1296,8 +1296,6 @@ class Kiosk(QStackedWidget):
             token = scanned
 
         token = token.strip()
-        self._pending_redeem_token = token
-
         self.redeem.status.setText("Checking token…")
         self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
 
@@ -1309,7 +1307,6 @@ class Kiosk(QStackedWidget):
 
         if msg == "redeem_ok":
             self.redeem.set_scanned_ok()
-            # ✅ success sound should now reliably play
             self.snd.success()
             QTimer.singleShot(1800, self.go_main)
             return
@@ -1339,7 +1336,6 @@ class Kiosk(QStackedWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # Set global default font to TT Hoves (fallback if missing)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     try_load_tt_hoves(base_dir)
     app.setFont(QFont(FONT_FAMILY, 18))
