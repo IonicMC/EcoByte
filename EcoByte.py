@@ -693,13 +693,13 @@ class HardwareWorker(QThread):
         if not self._pi.connected:
             raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
 
-        def servo_pulse(pulse_us, settle_s=0.35, release=True):
+        def servo_pulse(pulse_us, settle_s=0.35, hold=False):
             self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
             time.sleep(settle_s)
-            if release:
+            if not hold:
                 self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
 
-        servo_pulse(SERVO_CLOSED_US)
+        servo_pulse(SERVO_CLOSED_US, hold=True)
 
         try:
             while self.running:
@@ -755,7 +755,7 @@ class HardwareWorker(QThread):
 
                         servo_pulse(SERVO_OPEN_US)
                         time.sleep(GATE_OPEN_MS / 1000.0)
-                        servo_pulse(SERVO_CLOSED_US)
+                        servo_pulse(SERVO_CLOSED_US, hold=True)
 
                         # Capacitive sensor is supplementary only:
                         # it helps confirm the chute clears after a drop,
