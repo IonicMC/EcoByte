@@ -44,6 +44,16 @@ from PyQt6.QtWidgets import (
 # -----------------------------
 import pygame
 
+# -----------------------------
+# WS2812B / NeoPixel (optional)
+# -----------------------------
+try:
+    import board
+    import neopixel
+except Exception:
+    board = None
+    neopixel = None
+
 
 # ============================================================
 # CONFIG
@@ -67,6 +77,12 @@ SERVO_OPEN_US = 2500
 GATE_OPEN_MS = 900
 
 POINTS_PER_BOTTLE = 5
+
+# WS2812B LED strip (GPIO18 / Pin 12)
+LED_COUNT = 60          # change if your strip has a different LED count
+LED_BRIGHTNESS = 0.35   # 0.0 - 1.0
+LED_IDLE_COLOR = (0, 255, 0)      # Green (ready / idle)
+LED_VERIFY_COLOR = (255, 0, 0)    # Red (verifying / busy)
 
 # UI sizing
 BTN_W = 600
@@ -693,13 +709,13 @@ class HardwareWorker(QThread):
         if not self._pi.connected:
             raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
 
-        def servo_pulse(pulse_us, settle_s=0.35, hold=False):
+        def servo_pulse(pulse_us, settle_s=0.35, release=True):
             self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
             time.sleep(settle_s)
-            if not hold:
+            if release:
                 self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
 
-        servo_pulse(SERVO_CLOSED_US, hold=True)
+        servo_pulse(SERVO_CLOSED_US)
 
         try:
             while self.running:
@@ -755,7 +771,7 @@ class HardwareWorker(QThread):
 
                         servo_pulse(SERVO_OPEN_US)
                         time.sleep(GATE_OPEN_MS / 1000.0)
-                        servo_pulse(SERVO_CLOSED_US, hold=True)
+                        servo_pulse(SERVO_CLOSED_US)
 
                         # Capacitive sensor is supplementary only:
                         # it helps confirm the chute clears after a drop,
@@ -982,7 +998,7 @@ class DepositScreen(WaterBackground):
         header.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
         header.setStyleSheet("color: rgba(255,255,255,0.98);")
 
-        self.status = QLabel("Waiting for bottle…")
+        self.status = QLabel("Waiting for bottleâ¦")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setFont(QFont(FONT_FAMILY, 34))
         self.status.setStyleSheet("color: rgba(255,255,255,0.90);")
@@ -1035,11 +1051,11 @@ class DepositScreen(WaterBackground):
 
     def set_mode(self, mode: str):
         if mode == "WAITING":
-            self.status.setText("Waiting for bottle…")
+            self.status.setText("Waiting for bottleâ¦")
         elif mode == "VERIFYING":
-            self.status.setText("Confirming… Please wait")
+            self.status.setText("Confirmingâ¦ Please wait")
         elif mode == "DROPPING":
-            self.status.setText("Processing…")
+            self.status.setText("Processingâ¦")
 
     def animate_counts(self, bottles: int):
         self.bottles_lbl.animate_to(bottles)
@@ -1087,7 +1103,7 @@ class QRScreen(WaterBackground):
 
     def set_qr(self, payload_text: str, bottles: int):
         pts = bottles * POINTS_PER_BOTTLE
-        self.subtitle.setText(f"Bottles: {bottles}  •  EcoPoints: {pts}")
+        self.subtitle.setText(f"Bottles: {bottles}  â¢  EcoPoints: {pts}")
         pm = qr_pixmap_from_text(payload_text, size_px=560)
         self.qr_widget.setPixmap(pm)
 
@@ -1122,7 +1138,7 @@ class RedeemScreen(WaterBackground):
         instr.setStyleSheet("color: rgba(255,255,255,0.92);")
         instr.setContentsMargins(18, 0, 18, 0)
 
-        self.status = QLabel("Scanner ready…")
+        self.status = QLabel("Scanner readyâ¦")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setFont(QFont(FONT_FAMILY, 26))
         self.status.setStyleSheet("color: rgba(255,255,255,0.82);")
@@ -1178,11 +1194,11 @@ class RedeemScreen(WaterBackground):
         self._focus_input()
 
     def set_scanned_ok(self):
-        self.status.setText("SCANNED ✓")
+        self.status.setText("SCANNED â")
         self.status.setStyleSheet("color: rgba(232,255,242,1);")
 
     def set_scanned_bad(self):
-        self.status.setText("INVALID / USED ✕")
+        self.status.setText("INVALID / USED â")
         self.status.setStyleSheet("color: rgba(255,220,220,1);")
 
 
@@ -1203,6 +1219,63 @@ class IdleEventFilter(QObject):
                   QEvent.Type.KeyPress):
             self.activity.emit()
         return False
+
+
+# ============================================================
+# LED Controller (WS2812B)
+# ============================================================
+
+class LEDController(QObject):
+    """Non-blocking LED controller for a WS2812B strip.
+
+    Behavior:
+      - Ready/Idle (WAITING): solid green
+      - Busy (VERIFYING/DROPPING): solid red
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixels = None
+
+        if neopixel is None or board is None:
+            print("[LED] neopixel/board not available - LEDs disabled")
+            return
+
+        try:
+            self._pixels = neopixel.NeoPixel(
+                board.D18, LED_COUNT,
+                brightness=LED_BRIGHTNESS,
+                auto_write=True,
+                pixel_order=neopixel.GRB
+            )
+            self.set_idle()
+        except Exception as e:
+            print("[LED] init failed - LEDs disabled:", e)
+            self._pixels = None
+
+    def _set_color(self, rgb):
+        if self._pixels is None:
+            return
+        try:
+            self._pixels.fill(rgb)
+        except Exception as e:
+            print("[LED] write error:", e)
+
+    def set_idle(self):
+        self._set_color(LED_IDLE_COLOR)
+
+    def set_busy(self):
+        self._set_color(LED_VERIFY_COLOR)
+
+    def set_off(self):
+        self._set_color((0, 0, 0))
+
+    def apply_mode(self, mode: str):
+        if mode == "WAITING":
+            self.set_idle()
+        elif mode in ("VERIFYING", "DROPPING"):
+            self.set_busy()
+        else:
+            self.set_idle()
 
 
 # ============================================================
@@ -1250,8 +1323,13 @@ class Kiosk(QStackedWidget):
 
         self.session_bottles = 0
 
+        # LEDs: solid green = ready/idle, solid red = busy
+        self.led = LEDController(self)
+        self.led.set_idle()  # always green on startup/main screen
+
         self.worker = HardwareWorker()
         self.worker.ui_mode.connect(self.deposit.set_mode)
+        self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
         self.worker.wake_requested.connect(self.start_session_from_sensor)
         self.worker.start()
@@ -1271,6 +1349,7 @@ class Kiosk(QStackedWidget):
 
     def go_main(self):
         self.worker.set_session(False)
+        self.led.set_idle()
         self.session_bottles = 0
         self.deposit.animate_counts(0)
         self.setCurrentWidget(self.main)
@@ -1289,6 +1368,7 @@ class Kiosk(QStackedWidget):
 
     def go_redeem(self):
         self.worker.set_session(False)
+        self.led.set_idle()
         self.setCurrentWidget(self.redeem)
         self.reset_idle()
 
@@ -1341,7 +1421,7 @@ class Kiosk(QStackedWidget):
             token = scanned
 
         token = token.strip()
-        self.redeem.status.setText("Checking token…")
+        self.redeem.status.setText("Checking tokenâ¦")
         self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
 
         self.fb.consume_redeem_token_async(token)
@@ -1362,6 +1442,10 @@ class Kiosk(QStackedWidget):
             return
 
     def exit_app(self):
+        try:
+            self.led.set_off()
+        except Exception:
+            pass
         try:
             self.snd.stop_idle()
         except Exception:
