@@ -21,6 +21,7 @@ import random
 import threading
 
 import RPi.GPIO as GPIO
+import pigpio
 import qrcode
 import requests
 
@@ -48,7 +49,7 @@ import pygame
 # CONFIG
 # ============================================================
 
-IDLE_TIMEOUT_MS = 15000
+IDLE_TIMEOUT_MS = 30000
 
 # Hardware pins (BCM)
 GPIO_CAP = 17
@@ -59,9 +60,10 @@ GPIO_SERVO = 16
 DIST_THRESHOLD_CM = 10.0
 VERIFY_SECONDS = 2.0
 POLL_MS = 30
+CLEAR_BOTH_TIMEOUT_S = 3.0
 
-SERVO_CLOSED_DEG = 0
-SERVO_OPEN_DEG = 90
+SERVO_CLOSED_US = 500
+SERVO_OPEN_US = 2500
 GATE_OPEN_MS = 900
 
 POINTS_PER_BOTTLE = 5
@@ -121,9 +123,6 @@ BG_BOTTOM = QColor(35, 215, 190)
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
-def angle_to_duty(angle_deg: float) -> float:
-    a = clamp(angle_deg, 0, 180)
-    return 2.5 + (a / 180.0) * 10.0
 
 def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
     qr = qrcode.QRCode(
@@ -632,6 +631,7 @@ def make_card() -> QWidget:
 class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
     dropped = pyqtSignal()
+    wake_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -640,7 +640,11 @@ class HardwareWorker(QThread):
         self._verifying = False
         self._latched = False
         self._verify_start = None
-        self._servo_pwm = None
+        self._pi = None
+        self._wake_latched = False
+        self._waiting_clear = False
+        self._cap_seen_postdrop = False
+        self._clear_wait_start = None
 
     def stop(self):
         self.running = False
@@ -649,6 +653,10 @@ class HardwareWorker(QThread):
         self.session_enabled = enabled
         self._verifying = False
         self._latched = False
+        self._wake_latched = False
+        self._waiting_clear = False
+        self._cap_seen_postdrop = False
+        self._clear_wait_start = None
         if enabled:
             self.ui_mode.emit("WAITING")
 
@@ -681,29 +689,57 @@ class HardwareWorker(QThread):
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(GPIO_TRIG, GPIO.OUT)
         GPIO.setup(GPIO_ECHO, GPIO.IN)
-        GPIO.setup(GPIO_SERVO, GPIO.OUT)
+        self._pi = pigpio.pi()
+        if not self._pi.connected:
+            raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
 
-        self._servo_pwm = GPIO.PWM(GPIO_SERVO, 50)
-        self._servo_pwm.start(0)
+        def servo_pulse(pulse_us, settle_s=0.35, release=True):
+            self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
+            time.sleep(settle_s)
+            if release:
+                self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
 
-        def servo(angle):
-            duty = angle_to_duty(angle)
-            self._servo_pwm.ChangeDutyCycle(duty)
-            time.sleep(0.25)
-            self._servo_pwm.ChangeDutyCycle(0)
-
-        servo(SERVO_CLOSED_DEG)
+        servo_pulse(SERVO_CLOSED_US)
 
         try:
             while self.running:
-                if not self.session_enabled:
-                    self.msleep(POLL_MS)
-                    continue
-
                 cap = (GPIO.input(GPIO_CAP) == 1)
                 dist = self._read_distance_cm()
                 ultrasonic = (dist != float("inf")) and (dist < DIST_THRESHOLD_CM)
-                ready = cap and ultrasonic
+                ready = ultrasonic
+
+                if not self.session_enabled:
+                    if ready and (not self._wake_latched):
+                        self._wake_latched = True
+                        self.wake_requested.emit()
+                    elif not ready:
+                        self._wake_latched = False
+                    self.msleep(POLL_MS)
+                    continue
+
+                if self._waiting_clear:
+                    if cap:
+                        self._cap_seen_postdrop = True
+
+                    if (not ultrasonic) and (not cap):
+                        self._waiting_clear = False
+                        self._latched = False
+                        self._cap_seen_postdrop = False
+                        self._clear_wait_start = None
+                        self.ui_mode.emit("WAITING")
+                    elif self._clear_wait_start is not None and (time.monotonic() - self._clear_wait_start) >= CLEAR_BOTH_TIMEOUT_S:
+                        # Fallback so the machine does not stay busy forever
+                        # if an empty bottle never triggers the capacitive sensor cleanly.
+                        self._waiting_clear = False
+                        self._latched = False
+                        self._cap_seen_postdrop = False
+                        self._clear_wait_start = None
+                        self.ui_mode.emit("WAITING")
+                    else:
+                        self.ui_mode.emit("DROPPING")
+
+                    self.msleep(POLL_MS)
+                    continue
 
                 if ready and (not self._verifying) and (not self._latched):
                     self._verifying = True
@@ -717,11 +753,16 @@ class HardwareWorker(QThread):
                         self._verifying = False
                         self.ui_mode.emit("DROPPING")
 
-                        servo(SERVO_OPEN_DEG)
+                        servo_pulse(SERVO_OPEN_US)
                         time.sleep(GATE_OPEN_MS / 1000.0)
-                        servo(SERVO_CLOSED_DEG)
+                        servo_pulse(SERVO_CLOSED_US)
 
-                        self._latched = False
+                        # Capacitive sensor is supplementary only:
+                        # it helps confirm the chute clears after a drop,
+                        # but it does not reject bottles.
+                        self._cap_seen_postdrop = cap
+                        self._waiting_clear = True
+                        self._clear_wait_start = time.monotonic()
                         self.dropped.emit()
                 else:
                     self.ui_mode.emit("WAITING")
@@ -730,7 +771,9 @@ class HardwareWorker(QThread):
 
         finally:
             try:
-                self._servo_pwm.stop()
+                if self._pi is not None:
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
+                    self._pi.stop()
             except Exception:
                 pass
             GPIO.cleanup()
@@ -1210,6 +1253,7 @@ class Kiosk(QStackedWidget):
         self.worker = HardwareWorker()
         self.worker.ui_mode.connect(self.deposit.set_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
+        self.worker.wake_requested.connect(self.start_session_from_sensor)
         self.worker.start()
 
         self.redeem.scanned_text.connect(self.on_redeem_scanned)
@@ -1231,6 +1275,10 @@ class Kiosk(QStackedWidget):
         self.deposit.animate_counts(0)
         self.setCurrentWidget(self.main)
         self.reset_idle()
+
+    def start_session_from_sensor(self):
+        if self.currentWidget() is self.main:
+            self.start_session()
 
     def start_session(self):
         self.session_bottles = 0
