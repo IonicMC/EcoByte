@@ -66,13 +66,13 @@ GPIO_TRIG = 23
 GPIO_ECHO = 24
 GPIO_SERVO = 16
 
-DIST_THRESHOLD_CM = 4.0
+DIST_THRESHOLD_CM = 10.0
 VERIFY_SECONDS = 2.0
 POLL_MS = 30
 CLEAR_BOTH_TIMEOUT_S = 3.0
 
 SERVO_CLOSED_US = 500
-SERVO_OPEN_US = 1200
+SERVO_OPEN_US = 2500
 GATE_OPEN_MS = 900
 
 POINTS_PER_BOTTLE = 5
@@ -1412,6 +1412,8 @@ class Kiosk(QStackedWidget):
         self.update_idle_indicator()
 
     def update_idle_indicator(self):
+        if not hasattr(self, "idle_indicator"):
+            return
         remaining = self.idle_timer.remainingTime()
         if remaining < 0:
             remaining = IDLE_TIMEOUT_MS
@@ -1419,6 +1421,8 @@ class Kiosk(QStackedWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if not hasattr(self, "idle_indicator"):
+            return
         margin = 22
         self.idle_indicator.move(self.width() - self.idle_indicator.width() - margin, margin)
         self.idle_indicator.raise_()
