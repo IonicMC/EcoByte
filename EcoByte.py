@@ -21,7 +21,6 @@ import random
 import threading
 
 import RPi.GPIO as GPIO
-import pigpio
 import qrcode
 import requests
 
@@ -72,7 +71,7 @@ POLL_MS = 30
 CLEAR_BOTH_TIMEOUT_S = 3.0
 
 SERVO_CLOSED_US = 500
-SERVO_OPEN_US = 2500
+SERVO_OPEN_US = 1200
 GATE_OPEN_MS = 900
 
 POINTS_PER_BOTTLE = 5
@@ -703,7 +702,7 @@ class HardwareWorker(QThread):
         self._verifying = False
         self._latched = False
         self._verify_start = None
-        self._pi = None
+        self._servo_pwm = None
         self._wake_latched = False
         self._waiting_clear = False
         self._cap_seen_postdrop = False
@@ -752,15 +751,20 @@ class HardwareWorker(QThread):
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(GPIO_TRIG, GPIO.OUT)
         GPIO.setup(GPIO_ECHO, GPIO.IN)
-        self._pi = pigpio.pi()
-        if not self._pi.connected:
-            raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
+        GPIO.setup(GPIO_SERVO, GPIO.OUT)
+
+        self._servo_pwm = GPIO.PWM(GPIO_SERVO, 50)
+        self._servo_pwm.start(0)
+
+        def pulse_to_duty(pulse_us: float) -> float:
+            return (float(pulse_us) / 20000.0) * 100.0
 
         def servo_pulse(pulse_us, settle_s=0.35, hold=False):
-            self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
+            duty = pulse_to_duty(pulse_us)
+            self._servo_pwm.ChangeDutyCycle(duty)
             time.sleep(settle_s)
             if not hold:
-                self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
+                self._servo_pwm.ChangeDutyCycle(0)
 
         # Always hold the gate flat/closed while idle
         servo_pulse(SERVO_CLOSED_US, hold=True)
@@ -774,7 +778,7 @@ class HardwareWorker(QThread):
 
                 if not self.session_enabled:
                     # Keep platform held flat while not processing
-                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
+                    self._servo_pwm.ChangeDutyCycle(pulse_to_duty(SERVO_CLOSED_US))
                     if ready and (not self._wake_latched):
                         self._wake_latched = True
                         self.wake_requested.emit()
@@ -785,7 +789,7 @@ class HardwareWorker(QThread):
 
                 if self._waiting_clear:
                     # Keep platform held flat while waiting for chute to clear
-                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
+                    self._servo_pwm.ChangeDutyCycle(pulse_to_duty(SERVO_CLOSED_US))
 
                     if cap:
                         self._cap_seen_postdrop = True
@@ -833,16 +837,16 @@ class HardwareWorker(QThread):
                         self.dropped.emit()
                 else:
                     # Hold the platform flat while ready
-                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
+                    self._servo_pwm.ChangeDutyCycle(pulse_to_duty(SERVO_CLOSED_US))
                     self.ui_mode.emit("WAITING")
 
                 self.msleep(POLL_MS)
 
         finally:
             try:
-                if self._pi is not None:
-                    self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
-                    self._pi.stop()
+                if self._servo_pwm is not None:
+                    self._servo_pwm.ChangeDutyCycle(0)
+                    self._servo_pwm.stop()
             except Exception:
                 pass
             GPIO.cleanup()
@@ -1051,7 +1055,7 @@ class DepositScreen(WaterBackground):
         header.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
         header.setStyleSheet("color: rgba(255,255,255,0.98);")
 
-        self.status = QLabel("Waiting for bottleâ¦")
+        self.status = QLabel("Waiting for bottle...")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setFont(QFont(FONT_FAMILY, 34))
         self.status.setStyleSheet("color: rgba(255,255,255,0.90);")
@@ -1104,11 +1108,11 @@ class DepositScreen(WaterBackground):
 
     def set_mode(self, mode: str):
         if mode == "WAITING":
-            self.status.setText("Waiting for bottleâ¦")
+            self.status.setText("Waiting for bottle...")
         elif mode == "VERIFYING":
-            self.status.setText("Confirmingâ¦ Please wait")
+            self.status.setText("Confirming... Please wait")
         elif mode == "DROPPING":
-            self.status.setText("Processingâ¦")
+            self.status.setText("Processing...")
 
     def animate_counts(self, bottles: int):
         self.bottles_lbl.animate_to(bottles)
@@ -1156,7 +1160,7 @@ class QRScreen(WaterBackground):
 
     def set_qr(self, payload_text: str, bottles: int):
         pts = bottles * POINTS_PER_BOTTLE
-        self.subtitle.setText(f"Bottles: {bottles}  â¢  EcoPoints: {pts}")
+        self.subtitle.setText(f"Bottles: {bottles}  -  EcoPoints: {pts}")
         pm = qr_pixmap_from_text(payload_text, size_px=560)
         self.qr_widget.setPixmap(pm)
 
@@ -1191,7 +1195,7 @@ class RedeemScreen(WaterBackground):
         instr.setStyleSheet("color: rgba(255,255,255,0.92);")
         instr.setContentsMargins(18, 0, 18, 0)
 
-        self.status = QLabel("Scanner readyâ¦")
+        self.status = QLabel("Scanner ready...")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setFont(QFont(FONT_FAMILY, 26))
         self.status.setStyleSheet("color: rgba(255,255,255,0.82);")
@@ -1247,11 +1251,11 @@ class RedeemScreen(WaterBackground):
         self._focus_input()
 
     def set_scanned_ok(self):
-        self.status.setText("SCANNED â")
+        self.status.setText("SCANNED OK")
         self.status.setStyleSheet("color: rgba(232,255,242,1);")
 
     def set_scanned_bad(self):
-        self.status.setText("INVALID / USED â")
+        self.status.setText("INVALID / USED X")
         self.status.setStyleSheet("color: rgba(255,220,220,1);")
 
 
@@ -1538,7 +1542,7 @@ class Kiosk(QStackedWidget):
             token = scanned
 
         token = token.strip()
-        self.redeem.status.setText("Checking tokenâ¦")
+        self.redeem.status.setText("Checking token...")
         self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
 
         self.fb.consume_redeem_token_async(token)
