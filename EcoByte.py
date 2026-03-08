@@ -36,7 +36,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QStackedWidget,
-    QGraphicsOpacityEffect, QLineEdit, QMessageBox
+    QGraphicsOpacityEffect, QLineEdit, QDialog
 )
 
 # -----------------------------
@@ -812,7 +812,7 @@ class HardwareWorker(QThread):
                 cap = (GPIO.input(GPIO_CAP) == 1)
                 dist = self._read_distance_cm()
                 ultrasonic = (dist != float("inf")) and (dist < DIST_THRESHOLD_CM)
-                ready = ultrasonic
+                ready = cap
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -830,7 +830,7 @@ class HardwareWorker(QThread):
                     if cap:
                         self._cap_seen_postdrop = True
 
-                    if (not ultrasonic) and (not cap):
+                    if not cap:
                         self._waiting_clear = False
                         self._latched = False
                         self._cap_seen_postdrop = False
@@ -1289,6 +1289,62 @@ class RedeemScreen(WaterBackground):
     def set_scanned_bad(self):
         self.status.setText("INVALID / USED X")
         self.status.setStyleSheet("color: rgba(255,220,220,1);")
+
+
+class ThemedConfirmDialog(QDialog):
+    def __init__(self, parent, title: str, message: str, yes_text: str = "YES", no_text: str = "NO"):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("background: transparent;")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(28, 28, 28, 28)
+
+        card = QWidget()
+        card.setStyleSheet("""
+            QWidget {
+                background: rgba(22, 132, 150, 0.97);
+                border: 2px solid rgba(255,255,255,0.22);
+                border-radius: 32px;
+            }
+        """)
+        outer.addWidget(card)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(42, 36, 42, 34)
+        lay.setSpacing(18)
+
+        title_lbl = QLabel(title)
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setFont(QFont(FONT_FAMILY, 28, QFont.Weight.Bold))
+        title_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setFont(QFont(FONT_FAMILY, 20))
+        msg_lbl.setStyleSheet("color: rgba(255,255,255,0.92);")
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        no_btn = make_small_button(no_text)
+        yes_btn = make_small_button(yes_text)
+        no_btn.clicked.connect(self.reject)
+        yes_btn.clicked.connect(self.accept)
+        row.addStretch(1)
+        row.addWidget(no_btn)
+        row.addWidget(yes_btn)
+        row.addStretch(1)
+
+        lay.addWidget(title_lbl)
+        lay.addWidget(msg_lbl)
+        lay.addSpacing(4)
+        lay.addLayout(row)
+
+        self.setFixedSize(760, 320)
+
 
 
 # ============================================================
