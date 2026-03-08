@@ -36,7 +36,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QStackedWidget,
-    QGraphicsOpacityEffect, QLineEdit, QDialog
+    QGraphicsOpacityEffect, QLineEdit, QMessageBox, QDialog
 )
 
 # -----------------------------
@@ -539,6 +539,99 @@ class SecretExitCorner(QPushButton):
 
 
 # ============================================================
+# Themed confirmation dialog
+# ============================================================
+
+class ThemedConfirmDialog(QDialog):
+    def __init__(self, title: str, message: str, yes_text: str = "YES", no_text: str = "NO", parent=None):
+        super().__init__(parent)
+        self._accepted = False
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setModal(True)
+        self.setObjectName("ThemedConfirmDialog")
+        self.setStyleSheet("""
+            QDialog#ThemedConfirmDialog {
+                background: rgba(17, 128, 145, 0.98);
+                border: 2px solid rgba(255,255,255,0.20);
+                border-radius: 28px;
+            }
+            QLabel {
+                color: white;
+                background: transparent;
+            }
+            QPushButton {
+                min-width: 180px;
+                min-height: 64px;
+                border-radius: 20px;
+                font-size: 20px;
+                font-weight: bold;
+                padding: 6px 16px;
+            }
+        """)
+
+        self.setFixedSize(760, 360)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(44, 36, 44, 30)
+        root.setSpacing(16)
+
+        title_lbl = QLabel(title)
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setFont(QFont(FONT_FAMILY, 30, QFont.Weight.Bold))
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setFont(QFont(FONT_FAMILY, 22))
+        msg_lbl.setStyleSheet('color: rgba(255,255,255,0.94);')
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(18)
+
+        no_btn = QPushButton(no_text)
+        no_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.20);
+                color: white;
+                border: 2px solid rgba(255,255,255,0.34);
+            }
+            QPushButton:pressed { background: rgba(255,255,255,0.28); }
+        """)
+
+        yes_btn = QPushButton(yes_text)
+        yes_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255,255,255,0.94);
+                color: #0B7A3B;
+                border: none;
+            }
+            QPushButton:pressed { background: rgba(255,255,255,0.80); }
+        """)
+
+        no_btn.clicked.connect(self.reject)
+        yes_btn.clicked.connect(self.accept)
+
+        btn_row.addStretch(1)
+        btn_row.addWidget(no_btn)
+        btn_row.addWidget(yes_btn)
+        btn_row.addStretch(1)
+
+        root.addSpacing(6)
+        root.addWidget(title_lbl)
+        root.addWidget(msg_lbl)
+        root.addStretch(1)
+        root.addLayout(btn_row)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.parent() is not None:
+            parent_rect = self.parent().geometry()
+            self.move(
+                parent_rect.x() + (parent_rect.width() - self.width()) // 2,
+                parent_rect.y() + (parent_rect.height() - self.height()) // 2
+            )
+
+# ============================================================
 # Idle countdown indicator
 # ============================================================
 
@@ -812,7 +905,7 @@ class HardwareWorker(QThread):
                 cap = (GPIO.input(GPIO_CAP) == 1)
                 dist = self._read_distance_cm()
                 ultrasonic = (dist != float("inf")) and (dist < DIST_THRESHOLD_CM)
-                ready = cap
+                ready = cap and ultrasonic
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -830,7 +923,7 @@ class HardwareWorker(QThread):
                     if cap:
                         self._cap_seen_postdrop = True
 
-                    if not cap:
+                    if (not ultrasonic) and (not cap):
                         self._waiting_clear = False
                         self._latched = False
                         self._cap_seen_postdrop = False
@@ -1289,62 +1382,6 @@ class RedeemScreen(WaterBackground):
     def set_scanned_bad(self):
         self.status.setText("INVALID / USED X")
         self.status.setStyleSheet("color: rgba(255,220,220,1);")
-
-
-class ThemedConfirmDialog(QDialog):
-    def __init__(self, parent, title: str, message: str, yes_text: str = "YES", no_text: str = "NO"):
-        super().__init__(parent)
-        self.setModal(True)
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet("background: transparent;")
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(28, 28, 28, 28)
-
-        card = QWidget()
-        card.setStyleSheet("""
-            QWidget {
-                background: rgba(22, 132, 150, 0.97);
-                border: 2px solid rgba(255,255,255,0.22);
-                border-radius: 32px;
-            }
-        """)
-        outer.addWidget(card)
-
-        lay = QVBoxLayout(card)
-        lay.setContentsMargins(42, 36, 42, 34)
-        lay.setSpacing(18)
-
-        title_lbl = QLabel(title)
-        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_lbl.setFont(QFont(FONT_FAMILY, 28, QFont.Weight.Bold))
-        title_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
-
-        msg_lbl = QLabel(message)
-        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setFont(QFont(FONT_FAMILY, 20))
-        msg_lbl.setStyleSheet("color: rgba(255,255,255,0.92);")
-
-        row = QHBoxLayout()
-        row.setSpacing(16)
-        no_btn = make_small_button(no_text)
-        yes_btn = make_small_button(yes_text)
-        no_btn.clicked.connect(self.reject)
-        yes_btn.clicked.connect(self.accept)
-        row.addStretch(1)
-        row.addWidget(no_btn)
-        row.addWidget(yes_btn)
-        row.addStretch(1)
-
-        lay.addWidget(title_lbl)
-        lay.addWidget(msg_lbl)
-        lay.addSpacing(4)
-        lay.addLayout(row)
-
-        self.setFixedSize(760, 320)
-
 
 
 # ============================================================
