@@ -36,7 +36,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QStackedWidget,
-    QGraphicsOpacityEffect, QLineEdit
+    QGraphicsOpacityEffect, QLineEdit, QMessageBox
 )
 
 # -----------------------------
@@ -54,7 +54,6 @@ except Exception:
     board = None
     neopixel = None
 
-
 # ============================================================
 # CONFIG
 # ============================================================
@@ -67,13 +66,13 @@ GPIO_TRIG = 23
 GPIO_ECHO = 24
 GPIO_SERVO = 16
 
-DIST_THRESHOLD_CM = 10.0
+DIST_THRESHOLD_CM = 4.0
 VERIFY_SECONDS = 2.0
 POLL_MS = 30
 CLEAR_BOTH_TIMEOUT_S = 3.0
 
 SERVO_CLOSED_US = 500
-SERVO_OPEN_US = 2500
+SERVO_OPEN_US = 1200
 GATE_OPEN_MS = 900
 
 POINTS_PER_BOTTLE = 5
@@ -139,6 +138,9 @@ BG_BOTTOM = QColor(35, 215, 190)
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
+def angle_to_duty(angle_deg: float) -> float:
+    a = clamp(angle_deg, 0, 180)
+    return 2.5 + (a / 180.0) * 10.0
 
 def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
     qr = qrcode.QRCode(
@@ -496,6 +498,51 @@ class SecretExitCorner(QPushButton):
 
 
 # ============================================================
+# Idle countdown indicator
+# ============================================================
+
+class IdleRing(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._progress = 1.0
+        self._seconds = 0
+        self.setFixedSize(88, 88)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_countdown(self, remaining_ms: int, total_ms: int):
+        total_ms = max(1, int(total_ms))
+        remaining_ms = max(0, int(remaining_ms))
+        self._progress = clamp(remaining_ms / total_ms, 0.0, 1.0)
+        self._seconds = math.ceil(remaining_ms / 1000.0) if remaining_ms > 0 else 0
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        r = self.rect().adjusted(6, 6, -6, -6)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 26))
+        p.drawEllipse(r)
+
+        track = QPen(QColor(255, 255, 255, 75), 7)
+        track.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(track)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(r, 0, 360 * 16)
+
+        arc = QPen(QColor(255, 255, 255, 210), 7)
+        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(arc)
+        span = int(-360 * 16 * self._progress)
+        p.drawArc(r, 90 * 16, span)
+
+        p.setPen(QColor(255, 255, 255, 230))
+        p.setFont(QFont(FONT_FAMILY, 16, QFont.Weight.Bold))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, str(self._seconds))
+
+
+# ============================================================
 # Animated number label
 # ============================================================
 
@@ -709,13 +756,14 @@ class HardwareWorker(QThread):
         if not self._pi.connected:
             raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
 
-        def servo_pulse(pulse_us, settle_s=0.35, release=True):
+        def servo_pulse(pulse_us, settle_s=0.35, hold=False):
             self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
             time.sleep(settle_s)
-            if release:
+            if not hold:
                 self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
 
-        servo_pulse(SERVO_CLOSED_US)
+        # Always hold the gate flat/closed while idle
+        servo_pulse(SERVO_CLOSED_US, hold=True)
 
         try:
             while self.running:
@@ -725,6 +773,8 @@ class HardwareWorker(QThread):
                 ready = ultrasonic
 
                 if not self.session_enabled:
+                    # Keep platform held flat while not processing
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     if ready and (not self._wake_latched):
                         self._wake_latched = True
                         self.wake_requested.emit()
@@ -734,6 +784,9 @@ class HardwareWorker(QThread):
                     continue
 
                 if self._waiting_clear:
+                    # Keep platform held flat while waiting for chute to clear
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
+
                     if cap:
                         self._cap_seen_postdrop = True
 
@@ -744,8 +797,6 @@ class HardwareWorker(QThread):
                         self._clear_wait_start = None
                         self.ui_mode.emit("WAITING")
                     elif self._clear_wait_start is not None and (time.monotonic() - self._clear_wait_start) >= CLEAR_BOTH_TIMEOUT_S:
-                        # Fallback so the machine does not stay busy forever
-                        # if an empty bottle never triggers the capacitive sensor cleanly.
                         self._waiting_clear = False
                         self._latched = False
                         self._cap_seen_postdrop = False
@@ -771,7 +822,7 @@ class HardwareWorker(QThread):
 
                         servo_pulse(SERVO_OPEN_US)
                         time.sleep(GATE_OPEN_MS / 1000.0)
-                        servo_pulse(SERVO_CLOSED_US)
+                        servo_pulse(SERVO_CLOSED_US, hold=True)
 
                         # Capacitive sensor is supplementary only:
                         # it helps confirm the chute clears after a drop,
@@ -781,6 +832,8 @@ class HardwareWorker(QThread):
                         self._clear_wait_start = time.monotonic()
                         self.dropped.emit()
                 else:
+                    # Hold the platform flat while ready
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     self.ui_mode.emit("WAITING")
 
                 self.msleep(POLL_MS)
@@ -1030,7 +1083,7 @@ class DepositScreen(WaterBackground):
         back_btn = make_small_button("BACK")
         finish_btn = make_small_button("FINISH")
 
-        back_btn.clicked.connect(self.kiosk.go_main)
+        back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit)
         finish_btn.clicked.connect(self.kiosk.finish_session)
         back_btn.clicked.connect(self.kiosk.snd.tap)
         finish_btn.clicked.connect(self.kiosk.snd.tap)
@@ -1166,7 +1219,7 @@ class RedeemScreen(WaterBackground):
         cl.addStretch(1)
 
         back_btn = make_small_button("BACK")
-        back_btn.clicked.connect(self.kiosk.go_main)
+        back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit)
         back_btn.clicked.connect(self.kiosk.snd.tap)
 
         root.addStretch(1)
@@ -1221,6 +1274,7 @@ class IdleEventFilter(QObject):
         return False
 
 
+
 # ============================================================
 # LED Controller (WS2812B)
 # ============================================================
@@ -1270,13 +1324,14 @@ class LEDController(QObject):
         self._set_color((0, 0, 0))
 
     def apply_mode(self, mode: str):
+        # mode comes from HardwareWorker.ui_mode
         if mode == "WAITING":
             self.set_idle()
         elif mode in ("VERIFYING", "DROPPING"):
             self.set_busy()
         else:
+            # safe default
             self.set_idle()
-
 
 # ============================================================
 # Kiosk Controller
@@ -1338,6 +1393,14 @@ class Kiosk(QStackedWidget):
 
         self.idle_timer = QTimer(self)
         self.idle_timer.timeout.connect(self.go_main)
+
+        self.idle_indicator = IdleRing(self)
+        self.idle_indicator.raise_()
+
+        self._idle_visual_timer = QTimer(self)
+        self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
+        self._idle_visual_timer.start(100)
+
         self.reset_idle()
 
         self._filter = IdleEventFilter()
@@ -1346,6 +1409,55 @@ class Kiosk(QStackedWidget):
 
     def reset_idle(self):
         self.idle_timer.start(IDLE_TIMEOUT_MS)
+        self.update_idle_indicator()
+
+    def update_idle_indicator(self):
+        remaining = self.idle_timer.remainingTime()
+        if remaining < 0:
+            remaining = IDLE_TIMEOUT_MS
+        self.idle_indicator.set_countdown(remaining, IDLE_TIMEOUT_MS)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        margin = 22
+        self.idle_indicator.move(self.width() - self.idle_indicator.width() - margin, margin)
+        self.idle_indicator.raise_()
+
+    def confirm_back_from_deposit(self):
+        self.snd.tap()
+
+        if self.currentWidget() is not self.deposit:
+            self.go_main()
+            return
+
+        if self.session_bottles <= 0:
+            self.go_main()
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle('Go Back?')
+        msg.setText('Are you sure you want to go back?\nAll points from this session will be lost.')
+        msg.setIcon(QMessageBox.Icon.Warning)
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        msg.setStyleSheet("""
+            QMessageBox { background: rgb(18, 120, 135); }
+            QLabel { color: white; font-size: 22px; }
+            QPushButton {
+                min-width: 120px; min-height: 44px;
+                border-radius: 14px;
+                background: rgba(255,255,255,0.94);
+                color: #0B7A3B;
+                font-size: 18px; font-weight: bold;
+                padding: 6px 14px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,1.0); }
+        """)
+
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            self.go_main()
+        else:
+            self.reset_idle()
 
     def go_main(self):
         self.worker.set_session(False)
@@ -1383,6 +1495,7 @@ class Kiosk(QStackedWidget):
 
     def finish_session(self):
         self.worker.set_session(False)
+        self.led.set_idle()
 
         bottles = self.session_bottles
         points = bottles * POINTS_PER_BOTTLE
