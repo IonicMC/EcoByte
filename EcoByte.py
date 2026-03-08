@@ -36,7 +36,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QStackedWidget,
-    QGraphicsOpacityEffect, QLineEdit, QMessageBox, QDialog
+    QGraphicsOpacityEffect, QLineEdit, QDialog
 )
 
 # -----------------------------
@@ -81,11 +81,8 @@ IDLE_TIMEOUT_MS = 30000
 
 # Hardware pins (BCM)
 GPIO_CAP = 17
-GPIO_TRIG = 23
-GPIO_ECHO = 24
 GPIO_SERVO = 16
 
-DIST_THRESHOLD_CM = 10.0
 VERIFY_SECONDS = 2.0
 POLL_MS = 30
 CLEAR_BOTH_TIMEOUT_S = 3.0
@@ -857,35 +854,11 @@ class HardwareWorker(QThread):
         if enabled:
             self.ui_mode.emit("WAITING")
 
-    def _read_distance_cm(self) -> float:
-        GPIO.output(GPIO_TRIG, 0)
-        time.sleep(0.0002)
-        GPIO.output(GPIO_TRIG, 1)
-        time.sleep(0.00001)
-        GPIO.output(GPIO_TRIG, 0)
-
-        timeout = 0.03
-        start_wait = time.monotonic()
-        while GPIO.input(GPIO_ECHO) == 0:
-            if time.monotonic() - start_wait > timeout:
-                return float("inf")
-
-        pulse_start = time.monotonic()
-        while GPIO.input(GPIO_ECHO) == 1:
-            if time.monotonic() - pulse_start > timeout:
-                return float("inf")
-
-        pulse_end = time.monotonic()
-        pulse = pulse_end - pulse_start
-        return (pulse * 34300.0) / 2.0
-
     def run(self):
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
 
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-        GPIO.setup(GPIO_TRIG, GPIO.OUT)
-        GPIO.setup(GPIO_ECHO, GPIO.IN)
 
         self._pi = pigpio.pi()
         if not self._pi.connected:
@@ -903,9 +876,10 @@ class HardwareWorker(QThread):
         try:
             while self.running:
                 cap = (GPIO.input(GPIO_CAP) == 1)
-                dist = self._read_distance_cm()
-                ultrasonic = (dist != float("inf")) and (dist < DIST_THRESHOLD_CM)
-                ready = cap and ultrasonic
+                if cap:
+                    self.msleep(50)
+                    cap = (GPIO.input(GPIO_CAP) == 1)
+                ready = cap
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -923,7 +897,7 @@ class HardwareWorker(QThread):
                     if cap:
                         self._cap_seen_postdrop = True
 
-                    if (not ultrasonic) and (not cap):
+                    if not cap:
                         self._waiting_clear = False
                         self._latched = False
                         self._cap_seen_postdrop = False
@@ -1461,6 +1435,62 @@ class LEDController(QObject):
         else:
             # safe default
             self.set_idle()
+
+# ============================================================
+# Themed Confirm Dialog
+# ============================================================
+
+class ThemedConfirmDialog(QDialog):
+    def __init__(self, parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "No"):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setModal(True)
+        self.setObjectName("ThemedConfirmDialog")
+        self.setFixedSize(760, 360)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(34, 30, 34, 26)
+        root.setSpacing(18)
+
+        title_lbl = QLabel(title)
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setFont(QFont(FONT_FAMILY, 28, QFont.Weight.Bold))
+        title_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setFont(QFont(FONT_FAMILY, 21))
+        msg_lbl.setStyleSheet("color: rgba(255,255,255,0.92);")
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(16)
+        btn_row.addStretch(1)
+
+        no_btn = make_small_button(no_text)
+        yes_btn = make_small_button(yes_text)
+        no_btn.clicked.connect(self.reject)
+        yes_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(no_btn)
+        btn_row.addWidget(yes_btn)
+        btn_row.addStretch(1)
+
+        root.addStretch(1)
+        root.addWidget(title_lbl)
+        root.addWidget(msg_lbl)
+        root.addStretch(1)
+        root.addLayout(btn_row)
+
+        self.setStyleSheet("""
+            QDialog#ThemedConfirmDialog {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                            stop:0 rgba(35,175,215,245),
+                                            stop:1 rgba(35,215,190,245));
+                border: 2px solid rgba(255,255,255,0.24);
+                border-radius: 30px;
+            }
+        """)
 
 # ============================================================
 # Kiosk Controller
