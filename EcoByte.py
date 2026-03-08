@@ -21,6 +21,7 @@ import random
 import threading
 
 import RPi.GPIO as GPIO
+import pigpio
 import qrcode
 import requests
 
@@ -52,6 +53,25 @@ try:
 except Exception:
     board = None
     neopixel = None
+
+
+# -----------------------------
+# Audio environment helpers
+# -----------------------------
+def prepare_audio_env():
+    """Try to preserve audio access when running under sudo on Raspberry Pi."""
+    sudo_uid = os.environ.get("SUDO_UID")
+    if sudo_uid:
+        runtime_dir = f"/run/user/{sudo_uid}"
+        pulse_native = f"{runtime_dir}/pulse/native"
+        if os.path.isdir(runtime_dir):
+            os.environ.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+        if os.path.exists(pulse_native):
+            os.environ.setdefault("PULSE_SERVER", f"unix:{pulse_native}")
+
+    os.environ.setdefault("SDL_AUDIODRIVER", "pulseaudio")
+
+prepare_audio_env()
 
 # ============================================================
 # CONFIG
@@ -175,12 +195,34 @@ class SoundManager:
 
         try:
             pygame.mixer.pre_init(44100, -16, 2, 2048)
-            pygame.mixer.init()
-            pygame.mixer.set_num_channels(16)
-            self.ch_ui = pygame.mixer.Channel(1)
-            self.ch_fx = pygame.mixer.Channel(2)
-            self.ch_success = pygame.mixer.Channel(3)
-            self.ok = True
+            if pygame.mixer.get_init() is not None:
+                pygame.mixer.quit()
+
+            last_err = None
+            for driver in [os.environ.get("SDL_AUDIODRIVER", "pulseaudio"), "alsa", None]:
+                try:
+                    if driver:
+                        os.environ["SDL_AUDIODRIVER"] = driver
+                    elif "SDL_AUDIODRIVER" in os.environ:
+                        del os.environ["SDL_AUDIODRIVER"]
+
+                    pygame.mixer.init()
+                    print(f"[SOUND] initialized with SDL_AUDIODRIVER={os.environ.get('SDL_AUDIODRIVER', 'default')}")
+                    pygame.mixer.set_num_channels(16)
+                    self.ch_ui = pygame.mixer.Channel(1)
+                    self.ch_fx = pygame.mixer.Channel(2)
+                    self.ch_success = pygame.mixer.Channel(3)
+                    self.ok = True
+                    break
+                except Exception as e:
+                    last_err = e
+                    try:
+                        pygame.mixer.quit()
+                    except Exception:
+                        pass
+
+            if not self.ok:
+                raise last_err if last_err is not None else RuntimeError("Unknown pygame mixer init failure")
         except Exception as e:
             print("Sound init failed:", e)
             self.ok = False
@@ -702,7 +744,7 @@ class HardwareWorker(QThread):
         self._verifying = False
         self._latched = False
         self._verify_start = None
-        self._servo_pwm = None
+        self._pi = None
         self._wake_latched = False
         self._waiting_clear = False
         self._cap_seen_postdrop = False
@@ -751,20 +793,16 @@ class HardwareWorker(QThread):
         GPIO.setup(GPIO_CAP, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         GPIO.setup(GPIO_TRIG, GPIO.OUT)
         GPIO.setup(GPIO_ECHO, GPIO.IN)
-        GPIO.setup(GPIO_SERVO, GPIO.OUT)
 
-        self._servo_pwm = GPIO.PWM(GPIO_SERVO, 50)
-        self._servo_pwm.start(0)
-
-        def pulse_to_duty(pulse_us: float) -> float:
-            return (float(pulse_us) / 20000.0) * 100.0
+        self._pi = pigpio.pi()
+        if not self._pi.connected:
+            raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
 
         def servo_pulse(pulse_us, settle_s=0.35, hold=False):
-            duty = pulse_to_duty(pulse_us)
-            self._servo_pwm.ChangeDutyCycle(duty)
+            self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
             time.sleep(settle_s)
             if not hold:
-                self._servo_pwm.ChangeDutyCycle(0)
+                self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
 
         # Always hold the gate flat/closed while idle
         servo_pulse(SERVO_CLOSED_US, hold=True)
@@ -777,8 +815,7 @@ class HardwareWorker(QThread):
                 ready = ultrasonic
 
                 if not self.session_enabled:
-                    # Keep platform held flat while not processing
-                    self._servo_pwm.ChangeDutyCycle(pulse_to_duty(SERVO_CLOSED_US))
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     if ready and (not self._wake_latched):
                         self._wake_latched = True
                         self.wake_requested.emit()
@@ -788,8 +825,7 @@ class HardwareWorker(QThread):
                     continue
 
                 if self._waiting_clear:
-                    # Keep platform held flat while waiting for chute to clear
-                    self._servo_pwm.ChangeDutyCycle(pulse_to_duty(SERVO_CLOSED_US))
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
 
                     if cap:
                         self._cap_seen_postdrop = True
@@ -828,25 +864,21 @@ class HardwareWorker(QThread):
                         time.sleep(GATE_OPEN_MS / 1000.0)
                         servo_pulse(SERVO_CLOSED_US, hold=True)
 
-                        # Capacitive sensor is supplementary only:
-                        # it helps confirm the chute clears after a drop,
-                        # but it does not reject bottles.
                         self._cap_seen_postdrop = cap
                         self._waiting_clear = True
                         self._clear_wait_start = time.monotonic()
                         self.dropped.emit()
                 else:
-                    # Hold the platform flat while ready
-                    self._servo_pwm.ChangeDutyCycle(pulse_to_duty(SERVO_CLOSED_US))
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     self.ui_mode.emit("WAITING")
 
                 self.msleep(POLL_MS)
 
         finally:
             try:
-                if self._servo_pwm is not None:
-                    self._servo_pwm.ChangeDutyCycle(0)
-                    self._servo_pwm.stop()
+                if self._pi is not None:
+                    self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
+                    self._pi.stop()
             except Exception:
                 pass
             GPIO.cleanup()
