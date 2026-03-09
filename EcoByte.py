@@ -97,6 +97,7 @@ IDLE_TIMEOUT_MS = 30000
 GPIO_TRIG = 23
 GPIO_ECHO = 24
 GPIO_SERVO = 16
+GPIO_IR = 13  # <-- NEW: Anti-cheat IR sensor (HW-201)
 
 # Ultrasonic-only fallback mode
 ULTRA_MIN_CM = 2.0
@@ -149,7 +150,7 @@ ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 60  # <-- Changed for smoother UI
+PREVIEW_INTERVAL_MS = 33  # ~30FPS UI refresh for buttery smooth feed
 
 
 # ============================================================
@@ -173,7 +174,6 @@ def try_load_tt_hoves(base_dir: str):
         if os.path.exists(path):
             QFontDatabase.addApplicationFont(path)
 
-# More teal/light-blue gradient
 BG_TOP = QColor(35, 175, 215)
 BG_BOTTOM = QColor(35, 215, 190)
 
@@ -235,7 +235,6 @@ class SoundManager:
                         del os.environ["SDL_AUDIODRIVER"]
 
                     pygame.mixer.init()
-                    print(f"[SOUND] initialized with SDL_AUDIODRIVER={os.environ.get('SDL_AUDIODRIVER', 'default')}")
                     pygame.mixer.set_num_channels(16)
                     self.ch_ui = pygame.mixer.Channel(1)
                     self.ch_fx = pygame.mixer.Channel(2)
@@ -276,12 +275,10 @@ class SoundManager:
         if not self.ok:
             return None
         if not os.path.exists(path):
-            print(f"[SOUND] missing {label}: {path}")
             return None
         try:
             return pygame.mixer.Sound(path)
-        except Exception as e:
-            print(f"[SOUND] load error {label}:", e)
+        except Exception:
             return None
 
     def play_idle(self, volume=0.55):
@@ -292,14 +289,13 @@ class SoundManager:
                 return
             try:
                 if not os.path.exists(self.path_idle):
-                    print("[SOUND] missing idle.wav:", self.path_idle)
                     return
                 pygame.mixer.music.load(self.path_idle)
                 pygame.mixer.music.set_volume(volume)
                 pygame.mixer.music.play(-1)
                 self._idle_playing = True
-            except Exception as e:
-                print("Idle play error:", e)
+            except Exception:
+                pass
 
     def stop_idle(self):
         if not self.ok:
@@ -858,7 +854,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Background ONNX Bottle Verifier
+# Dual-Threaded ONNX Bottle Verifier (Zero Lag Preview)
 # ============================================================
 
 class ONNXBottleVerifier:
@@ -867,14 +863,18 @@ class ONNXBottleVerifier:
         self.available = False
         self.reason = "disabled"
         self.model_path = os.path.join(base_dir, ONNX_MODEL_PATH)
+        
         self._net = None
         self._cap = None
         self._lock = threading.RLock()
         
-        self._last_qimage = None
+        # State for UI thread
+        self._raw_frame = None
+        self._latest_bboxes = []
         self._last_detection = False
         self._last_conf = 0.0
         self._frame_count = 0
+        
         self.running = False
 
         if not self.enabled:
@@ -893,9 +893,15 @@ class ONNXBottleVerifier:
             print(f"[ONNX] loaded {self.model_path}")
 
             self.running = True
-            # Spawn a dedicated background thread for continuous inference
+            
+            # Thread 1: Keep the camera buffer completely empty so video is realtime
             self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
             self._capture_thread.start()
+            
+            # Thread 2: Run inference entirely separated from camera pulling
+            self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+            self._inference_thread.start()
+            
         except Exception as e:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
@@ -906,6 +912,9 @@ class ONNXBottleVerifier:
         try:
             self._cap = cv2.VideoCapture(CAMERA_INDEX)
             try:
+                # Force smaller resolution to reduce USB bus overhead
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
@@ -928,28 +937,41 @@ class ONNXBottleVerifier:
             self._cap = None
 
     def _capture_loop(self):
-        """Dedicated background loop for inference (Prevents UI freezing)."""
+        """Thread 1: Purely reads the camera to kill all video lag."""
         while self.running:
             if not self._ensure_camera():
                 time.sleep(0.5)
                 continue
 
             ok, frame = self._cap.read()
-            if not ok or frame is None:
+            if ok and frame is not None:
+                with self._lock:
+                    # Keep the absolute newest frame memory-safe for the other thread
+                    self._raw_frame = frame.copy()
+            else:
+                time.sleep(0.01)
+
+    def _inference_loop(self):
+        """Thread 2: Runs AI on the newest frame available."""
+        while self.running:
+            frame_to_infer = None
+            with self._lock:
+                if self._raw_frame is not None:
+                    frame_to_infer = self._raw_frame.copy()
+            
+            if frame_to_infer is None:
                 time.sleep(0.05)
                 continue
 
-            kept, detected, best_conf = self._run_model(frame)
-            annotated = self._annotate(frame, kept)
+            kept, detected, best_conf = self._run_model(frame_to_infer)
 
             with self._lock:
-                self._store_qimage(annotated)
+                self._latest_bboxes = kept
                 self._last_detection = detected
                 self._last_conf = best_conf
                 self._frame_count += 1
                 
-            # Yield CPU briefly so the Pi doesn't cook itself
-            time.sleep(0.02)
+            time.sleep(0.01) # Breathe CPU
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
@@ -1011,19 +1033,23 @@ class ONNXBottleVerifier:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
         return frame
 
-    def _store_qimage(self, frame_bgr):
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        bytes_per_line = ch * w
-        # Critical copy so QImage owns the memory and avoids UI artifacts
-        self._last_qimage = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-
     def get_preview_qimage(self):
-        """Returns the pre-rendered image instantly."""
+        """Called by UI thread: Overlays newest AI data on newest frame instantly."""
         if not self.available:
             return None
+            
         with self._lock:
-            return self._last_qimage
+            if self._raw_frame is None:
+                return None
+            disp_frame = self._raw_frame.copy()
+            bboxes = list(self._latest_bboxes)
+
+        disp_frame = self._annotate(disp_frame, bboxes)
+        rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        
+        return QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
     def quick_detect(self) -> bool:
         """Returns the latest detection state instantly."""
@@ -1075,7 +1101,7 @@ class ONNXBottleVerifier:
 
 
 # ============================================================
-# Hardware Worker
+# Hardware Worker (Now with Anti-Cheat IR)
 # ============================================================
 
 class HardwareWorker(QThread):
@@ -1155,6 +1181,9 @@ class HardwareWorker(QThread):
         GPIO.setup(GPIO_TRIG, GPIO.OUT)
         GPIO.setup(GPIO_ECHO, GPIO.IN)
         GPIO.output(GPIO_TRIG, False)
+        
+        # Setup IR Anti-Cheat Sensor (usually outputs LOW when object detected)
+        GPIO.setup(GPIO_IR, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         self._pi = pigpio.pi()
         if not self._pi.connected:
@@ -1228,12 +1257,37 @@ class HardwareWorker(QThread):
                             self.ui_mode.emit("WAITING")
                         else:
                             self.ui_mode.emit("DROPPING")
+                            
+                            # Open Gate
                             servo_pulse(SERVO_OPEN_US)
-                            time.sleep(GATE_OPEN_MS / 1000.0)
+                            
+                            # --- ANTI-CHEAT IR CHECK ---
+                            # Wait for IR sensor to trigger while gate is open
+                            drop_start = time.monotonic()
+                            bottle_fell = False
+                            gate_duration = GATE_OPEN_MS / 1000.0
+                            
+                            while (time.monotonic() - drop_start) < gate_duration:
+                                # HW-201 goes LOW (0) when object is detected
+                                if GPIO.input(GPIO_IR) == GPIO.LOW:
+                                    bottle_fell = True
+                                    # We don't break immediately so the servo has 
+                                    # enough time to let the bottle fully clear.
+                                time.sleep(0.01)
+                                
+                            # Close Gate
                             servo_pulse(SERVO_CLOSED_US, hold=True)
-                            self._waiting_clear = True
-                            self._clear_wait_start = time.monotonic()
-                            self.dropped.emit()
+                            
+                            # Final decision
+                            if bottle_fell:
+                                self._waiting_clear = True
+                                self._clear_wait_start = time.monotonic()
+                                self.dropped.emit()
+                            else:
+                                print("[ANTI-CHEAT] Bottle pulled back! No points awarded.")
+                                self._latched = False
+                                self.ui_mode.emit("WAITING")
+                            
                 else:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     self.ui_mode.emit("WAITING")
