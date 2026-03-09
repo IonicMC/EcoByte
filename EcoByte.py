@@ -45,7 +45,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QStackedWidget,
-    QGraphicsOpacityEffect, QLineEdit, QDialog
+    QGraphicsOpacityEffect, QLineEdit, QDialog, QFrame
 )
 
 import pygame
@@ -95,7 +95,7 @@ SERVO_OPEN_US = 1200
 
 POINTS_PER_BOTTLE = 5
 
-# WS2812B LED strip
+# WS2812B LED strip (D10 / SPI)
 LED_COUNT = 60          
 LED_BRIGHTNESS = 0.35   
 LED_IDLE_COLOR = (0, 255, 0)      
@@ -105,7 +105,7 @@ LED_VERIFY_COLOR = (255, 0, 0)
 BTN_W, BTN_H = 600, 124
 SMALL_BTN_W, SMALL_BTN_H = 320, 98
 
-# Background animation
+# Background animation (Capped at 30fps to stop overheating, speeds doubled)
 WATER_FPS_MS = 33
 WAVE_SPEED = 0.08
 WAVE_OPACITY = 0.18
@@ -129,7 +129,6 @@ ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 33  
 
 
 # ============================================================
@@ -405,26 +404,43 @@ class SecretExitCorner(QPushButton):
 class ThemedConfirmDialog(QDialog):
     def __init__(self, parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "No"):
         super().__init__(parent)
-        # WA_TranslucentBackground fixes the sharp black window corners on Linux X11!
+        
+        # 1. Make the raw window canvas transparent
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setModal(True)
         self.setFixedSize(760, 360)
 
-        root = QVBoxLayout(self)
+        # 2. Set the main layout to have zero margins so the frame fills it entirely
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 3. Create a QFrame to hold the background CSS
+        bg_frame = QFrame(self)
+        bg_frame.setStyleSheet("""
+            QFrame { 
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(35,175,215,245), stop:1 rgba(35,215,190,245)); 
+                border: 2px solid rgba(255,255,255,0.24); 
+                border-radius: 30px; 
+            }
+        """)
+        main_layout.addWidget(bg_frame)
+        
+        # 4. Put all the content inside the bg_frame
+        root = QVBoxLayout(bg_frame)
         root.setContentsMargins(34, 30, 34, 26)
         root.setSpacing(18)
 
         title_lbl = QLabel(title)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_lbl.setFont(QFont(FONT_FAMILY, 28, QFont.Weight.Bold))
-        title_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
+        title_lbl.setStyleSheet("color: rgba(255,255,255,0.98); border: none; background: transparent;")
 
         msg_lbl = QLabel(message)
         msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg_lbl.setWordWrap(True)
         msg_lbl.setFont(QFont(FONT_FAMILY, 21))
-        msg_lbl.setStyleSheet("color: rgba(255,255,255,0.92);")
+        msg_lbl.setStyleSheet("color: rgba(255,255,255,0.92); border: none; background: transparent;")
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(16)
@@ -449,8 +465,6 @@ class ThemedConfirmDialog(QDialog):
 
         root.addStretch(1); root.addWidget(title_lbl); root.addWidget(msg_lbl)
         root.addStretch(1); root.addLayout(btn_row)
-
-        self.setStyleSheet("QDialog { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(35,175,215,245), stop:1 rgba(35,215,190,245)); border: 2px solid rgba(255,255,255,0.24); border-radius: 30px; }")
 
 class IdleRing(QWidget):
     def __init__(self, parent=None):
@@ -551,7 +565,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Dual-Threaded ONNX Bottle Verifier (Zero UI Lag)
+# Dual-Threaded ONNX Bottle Verifier (No Tracker, Just Yolo)
 # ============================================================
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
@@ -565,15 +579,10 @@ class ONNXBottleVerifier:
         
         self._raw_frame_for_inference = None
         self._latest_bboxes = []
-        self._best_new_box = None
         self._last_detection = False
         self._last_conf = 0.0
         self._frame_count = 0
         
-        self._tracker = None
-        self._needs_tracker_sync = False
-        
-        # This holds the completed, fully-drawn QImage so the UI thread does no work!
         self._preview_qimage = None 
         
         self.running = False
@@ -596,12 +605,6 @@ class ONNXBottleVerifier:
             self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
             self._inference_thread.start()
         except Exception as e: self.reason = str(e)
-
-    def _create_tracker(self):
-        try: return cv2.TrackerKCF_create()
-        except AttributeError:
-            try: return cv2.legacy.TrackerKCF_create()
-            except AttributeError: return None
 
     def _ensure_camera(self) -> bool:
         if self._cap is not None and self._cap.isOpened(): return True
@@ -627,7 +630,6 @@ class ONNXBottleVerifier:
             self._cap = None
 
     def _capture_loop(self):
-        # Thread 1 completely handles grabbing frames AND running the tracker, leaving UI clean
         while self.running:
             if not self._ensure_camera():
                 time.sleep(0.5); continue
@@ -636,36 +638,15 @@ class ONNXBottleVerifier:
             if ok and frame is not None:
                 with self._lock:
                     self._raw_frame_for_inference = frame.copy()
-                    sync_needed = self._needs_tracker_sync
-                    self._needs_tracker_sync = False
-                    best_box = self._best_new_box
                     yolo_boxes = list(self._latest_bboxes)
 
                 disp_frame = frame.copy()
-                tracking_bbox = None
 
-                # Initialize or update tracker on this background thread
-                if sync_needed and best_box:
-                    self._tracker = self._create_tracker()
-                    if self._tracker is not None:
-                        self._tracker.init(disp_frame, tuple(best_box))
-                        tracking_bbox = best_box
-                elif self._tracker is not None:
-                    success, bbox = self._tracker.update(disp_frame)
-                    if success: tracking_bbox = [int(v) for v in bbox]
-
-                # Draw the boxes
-                if tracking_bbox is not None and self._tracker is not None:
-                    x, y, bw, bh = tracking_bbox
+                # Directly draw the latest raw YOLO boxes (Choppy but zero delay)
+                for (x, y, bw, bh), score in yolo_boxes:
                     cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
-                    score = yolo_boxes[0][1] if yolo_boxes else 0.0
                     cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
-                else:
-                    for (x, y, bw, bh), score in yolo_boxes:
-                        cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
-                        cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
 
-                # Prepare the QImage so the UI thread doesn't have to
                 rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb.shape
                 bytes_per_line = ch * w
@@ -693,9 +674,6 @@ class ONNXBottleVerifier:
                 self._last_detection = detected
                 self._last_conf = best_conf
                 self._frame_count += 1
-                if detected and len(kept) > 0: 
-                    self._best_new_box = kept[0][0]
-                    self._needs_tracker_sync = True
                 
             time.sleep(0.02)
 
@@ -736,7 +714,6 @@ class ONNXBottleVerifier:
         return kept, len(kept) > 0, best_conf
 
     def get_preview_qimage(self):
-        # Called by UI Thread: Completely instantaneous, ZERO LAG
         if not self.available: return None
         with self._lock: return self._preview_qimage
 
@@ -1172,7 +1149,7 @@ class LEDController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixels = None
-        self._current_color = None  # Cache to prevent SPI flooding
+        self._current_color = None 
         
         if neopixel is None or board is None: return
         try:
@@ -1182,7 +1159,7 @@ class LEDController(QObject):
 
     def _set_color(self, rgb):
         if self._pixels:
-            if self._current_color == rgb: return # Debounce to prevent flicker!
+            if self._current_color == rgb: return 
             self._current_color = rgb
             try:
                 self._pixels.fill((0, 0, 0)) 
@@ -1274,7 +1251,6 @@ class Kiosk(QStackedWidget):
         remaining = self.idle_timer.remainingTime()
         if remaining < 0: remaining = IDLE_TIMEOUT_MS
         
-        # Only show the countdown ring in the last 10 seconds!
         if remaining <= 10000:
             if self.idle_indicator.isHidden(): self.idle_indicator.show()
             self.idle_indicator.set_countdown(remaining, 10000)
