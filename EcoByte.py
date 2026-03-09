@@ -11,7 +11,6 @@ os.environ["QT_IM_MODULE"] = "none"
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
 os.environ["QT_SCALE_FACTOR"] = "1"
 os.environ["QT_FONT_DPI"] = "96"
-os.environ["OPENCV_VIDEOIO_PRIORITY_GSTREAMER"] = "0"
 
 import sys
 import time
@@ -152,7 +151,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 100
+PREVIEW_INTERVAL_MS = 220
 
 
 # ============================================================
@@ -864,7 +863,6 @@ def make_card() -> QWidget:
 # Optional ONNX Bottle Verifier
 # ============================================================
 
-
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
         self.enabled = bool(USE_ONNX_VERIFIER)
@@ -874,20 +872,11 @@ class ONNXBottleVerifier:
         self._net = None
         self._cap = None
         self._lock = threading.RLock()
-
-        # Threaded camera state
-        self._camera_thread = None
-        self._camera_running = False
-        self._latest_frame = None
-        self._latest_ts = 0.0
-
-        # Preview cache
         self._last_qimage = None
-        self._last_boxes = []
         self._last_detection = False
         self._last_conf = 0.0
         self._last_preview_infer_ts = 0.0
-        self._preview_infer_interval_s = 0.12  # ~8 FPS inference, smoother preview
+        self._preview_infer_interval_s = 0.25
 
         if not self.enabled:
             return
@@ -907,96 +896,24 @@ class ONNXBottleVerifier:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
 
-    def _start_camera_thread(self):
-        if self._camera_thread is not None and self._camera_thread.is_alive():
-            return
-
-        self._camera_running = True
-
-        def _reader():
-            while self._camera_running:
-                try:
-                    if self._cap is None or not self._cap.isOpened():
-                        time.sleep(0.02)
-                        continue
-
-                    ok, frame = self._cap.read()
-                    if ok and frame is not None:
-                        with self._lock:
-                            self._latest_frame = frame
-                            self._latest_ts = time.monotonic()
-                    else:
-                        time.sleep(0.01)
-                except Exception:
-                    time.sleep(0.02)
-
-        self._camera_thread = threading.Thread(target=_reader, daemon=True)
-        self._camera_thread.start()
-
     def _ensure_camera(self) -> bool:
         if self._cap is not None and self._cap.isOpened():
-            self._start_camera_thread()
             return True
         try:
-            cap = None
+            self._cap = cv2.VideoCapture(CAMERA_INDEX)
             try:
-                cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
-            except Exception:
-                cap = None
-
-            if cap is None or not cap.isOpened():
-                try:
-                    if cap is not None:
-                        cap.release()
-                except Exception:
-                    pass
-                cap = cv2.VideoCapture(CAMERA_INDEX)
-
-            self._cap = cap
-            if self._cap is None:
-                return False
-
-            try:
-                # Set MJPG first; often unlocks much higher FPS on Pi USB cams
-                self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            except Exception:
-                pass
-
-            try:
-                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                self._cap.set(cv2.CAP_PROP_FPS, 30)
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-
             start = time.monotonic()
             while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
                 time.sleep(0.05)
-
-            if not self._cap.isOpened():
-                return False
-
-            # Warm up briefly and flush stale frames
-            warm_end = time.monotonic() + 0.35
-            while time.monotonic() < warm_end:
-                self._cap.read()
-                time.sleep(0.01)
-
-            self._start_camera_thread()
-            return True
+            return self._cap.isOpened()
         except Exception:
             self._cap = None
             return False
 
     def release(self):
-        self._camera_running = False
-        try:
-            if self._camera_thread is not None and self._camera_thread.is_alive():
-                self._camera_thread.join(timeout=0.4)
-        except Exception:
-            pass
-        self._camera_thread = None
         with self._lock:
             try:
                 if self._cap is not None:
@@ -1004,13 +921,6 @@ class ONNXBottleVerifier:
             except Exception:
                 pass
             self._cap = None
-            self._latest_frame = None
-
-    def _get_latest_frame(self):
-        with self._lock:
-            if self._latest_frame is None:
-                return None
-            return self._latest_frame.copy()
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
@@ -1081,93 +991,85 @@ class ONNXBottleVerifier:
     def get_preview_qimage(self):
         if not self.available or self._net is None:
             return None
-        if not self._ensure_camera():
+        if not self._lock.acquire(blocking=False):
             return self._last_qimage
-
-        frame = self._get_latest_frame()
-        if frame is None:
+        try:
+            if not self._ensure_camera():
+                return self._last_qimage
+            now = time.monotonic()
+            if self._last_qimage is not None and (now - self._last_preview_infer_ts) < self._preview_infer_interval_s:
+                return self._last_qimage
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return self._last_qimage
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
+            self._store_qimage(annotated)
+            self._last_detection = detected
+            self._last_conf = best_conf
+            self._last_preview_infer_ts = now
             return self._last_qimage
-
-        now = time.monotonic()
-        # Run inference only at sampled rate; draw cached boxes on fresh frames otherwise
-        if (now - self._last_preview_infer_ts) >= self._preview_infer_interval_s:
-            try:
-                kept, detected, best_conf = self._run_model(frame)
-                self._last_boxes = kept
-                self._last_detection = detected
-                self._last_conf = best_conf
-                self._last_preview_infer_ts = now
-            except Exception:
-                pass
-
-        annotated = self._annotate(frame, self._last_boxes)
-        self._store_qimage(annotated)
-        return self._last_qimage
+        finally:
+            self._lock.release()
 
     def quick_detect(self) -> bool:
         if not self.available or self._net is None:
             return False
-        if not self._ensure_camera():
-            return False
-        frame = self._get_latest_frame()
-        if frame is None:
-            return False
-        kept, detected, best_conf = self._run_model(frame)
-        self._last_boxes = kept
-        self._last_detection = detected
-        self._last_conf = best_conf
-        self._store_qimage(self._annotate(frame, kept))
-        return detected
+        with self._lock:
+            if not self._ensure_camera():
+                return False
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return False
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
+            self._store_qimage(annotated)
+            self._last_detection = detected
+            self._last_conf = best_conf
+            return detected
 
     def verify_once(self) -> bool:
         if not self.available or self._net is None:
             return True
-        if not self._ensure_camera():
-            print('[ONNX] camera failed to open; allowing fallback')
-            return True
 
-        start = time.monotonic()
-        frames = 0
-        positives = 0
-        best = 0.0
-        consecutive = 0
-        best_consecutive = 0
-        last_ts_seen = -1.0
+        with self._lock:
+            if not self._ensure_camera():
+                print('[ONNX] camera failed to open; allowing fallback')
+                return True
 
-        while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
-            frame = self._get_latest_frame()
-            current_ts = self._latest_ts
-            if frame is None or current_ts == last_ts_seen:
-                time.sleep(0.01)
-                continue
+            start = time.monotonic()
+            frames = 0
+            positives = 0
+            best = 0.0
+            consecutive = 0
+            best_consecutive = 0
 
-            last_ts_seen = current_ts
-            kept, detected, conf = self._run_model(frame)
-            self._last_boxes = kept
-            self._last_detection = detected
-            self._last_conf = conf
-            self._store_qimage(self._annotate(frame, kept))
+            while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
+                ok, frame = self._cap.read()
+                if not ok or frame is None:
+                    time.sleep(0.01)
+                    continue
+                kept, detected, conf = self._run_model(frame)
+                annotated = self._annotate(frame, kept)
+                self._store_qimage(annotated)
+                frames += 1
+                best = max(best, conf)
+                if detected:
+                    positives += 1
+                    consecutive += 1
+                    best_consecutive = max(best_consecutive, consecutive)
+                else:
+                    consecutive = 0
+                time.sleep(0.015)
 
-            frames += 1
-            best = max(best, conf)
-            if detected:
-                positives += 1
-                consecutive += 1
-                best_consecutive = max(best_consecutive, consecutive)
-            else:
-                consecutive = 0
+            if frames == 0:
+                print('[ONNX] no frames during verify; allowing fallback')
+                return True
 
-            # Slightly smaller sleep; thread keeps camera fresh
-            time.sleep(0.005)
-
-        if frames == 0:
-            print('[ONNX] no frames during verify; allowing fallback')
-            return True
-
-        ratio = positives / frames
-        accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
-        print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
-        return accepted
+            ratio = positives / frames
+            accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
+            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
+            return accepted
 
 
 # ============================================================
