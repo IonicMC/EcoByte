@@ -81,11 +81,11 @@ GPIO_ECHO = 24
 GPIO_SERVO = 16
 GPIO_IR = 27  # BCM 27 is Physical Pin 13
 
-# Ultrasonic-only fallback mode
+# Ultrasonic & State Machine Timers
 ULTRA_MIN_CM = 2.0
 ULTRA_MAX_CM = 18.0
 ULTRA_TIMEOUT_S = 0.03
-VERIFY_SECONDS = 1.5      
+VERIFY_SECONDS = 3.0      # Increased from 1.5 to give the AI time to see the bottle!
 IR_DROP_TIMEOUT_S = 3.0   
 COOLDOWN_SECONDS = 2.0    
 POLL_MS = 60
@@ -105,7 +105,7 @@ LED_VERIFY_COLOR = (255, 0, 0)
 BTN_W, BTN_H = 600, 124
 SMALL_BTN_W, SMALL_BTN_H = 320, 98
 
-# Background animation (Capped at 30fps to stop overheating, speeds doubled)
+# Background animation
 WATER_FPS_MS = 33
 WAVE_SPEED = 0.08
 WAVE_OPACITY = 0.18
@@ -129,6 +129,7 @@ ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_MIN_POSITIVES = 2
+PREVIEW_INTERVAL_MS = 33  # Re-added the missing config to prevent crash!
 
 
 # ============================================================
@@ -405,17 +406,14 @@ class ThemedConfirmDialog(QDialog):
     def __init__(self, parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "No"):
         super().__init__(parent)
         
-        # 1. Make the raw window canvas transparent
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setModal(True)
         self.setFixedSize(760, 360)
 
-        # 2. Set the main layout to have zero margins so the frame fills it entirely
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 3. Create a QFrame to hold the background CSS
         bg_frame = QFrame(self)
         bg_frame.setStyleSheet("""
             QFrame { 
@@ -426,7 +424,6 @@ class ThemedConfirmDialog(QDialog):
         """)
         main_layout.addWidget(bg_frame)
         
-        # 4. Put all the content inside the bg_frame
         root = QVBoxLayout(bg_frame)
         root.setContentsMargins(34, 30, 34, 26)
         root.setSpacing(18)
@@ -565,7 +562,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Dual-Threaded ONNX Bottle Verifier (No Tracker, Just Yolo)
+# Dual-Threaded ONNX Bottle Verifier (No Tracker)
 # ============================================================
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
@@ -642,7 +639,7 @@ class ONNXBottleVerifier:
 
                 disp_frame = frame.copy()
 
-                # Directly draw the latest raw YOLO boxes (Choppy but zero delay)
+                # Directly draw the latest raw YOLO boxes
                 for (x, y, bw, bh), score in yolo_boxes:
                     cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
                     cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
@@ -816,7 +813,6 @@ class HardwareWorker(QThread):
         try:
             while self.running:
                 
-                # 1. State: Object must be fully removed 
                 if self._waiting_for_removal:
                     if self._object_present():
                         self._clear_start_time = time.monotonic() 
@@ -827,7 +823,6 @@ class HardwareWorker(QThread):
                     self.msleep(100)
                     continue
                 
-                # 2. State: Cooldown block
                 if self._in_cooldown:
                     time.sleep(COOLDOWN_SECONDS)
                     self._in_cooldown = False
@@ -835,7 +830,6 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("WAITING")
                     continue
 
-                # 3. Main Loop
                 ready = self._object_present()
 
                 if ready:
@@ -1059,8 +1053,7 @@ class DepositScreen(WaterBackground):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._preview_timer.isActive(): 
-            self._preview_timer.start(33)  # <-- Changed to 33 directly
+        if not self._preview_timer.isActive(): self._preview_timer.start(PREVIEW_INTERVAL_MS)
 
     def hideEvent(self, event):
         super().hideEvent(event); self._preview_timer.stop()
@@ -1144,13 +1137,17 @@ class IdleEventFilter(QObject):
         return False
 
 # ============================================================
-# LED Controller (WS2812B)
+# LED Controller (Blinking Logic Added)
 # ============================================================
 class LEDController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixels = None
         self._current_color = None 
+        self._blink_state = False
+        
+        self._blink_timer = QTimer(self)
+        self._blink_timer.timeout.connect(self._toggle_blink)
         
         if neopixel is None or board is None: return
         try:
@@ -1167,10 +1164,31 @@ class LEDController(QObject):
                 self._pixels.fill(rgb)
             except Exception: pass
 
-    def set_idle(self): self._set_color(LED_IDLE_COLOR)
-    def set_busy(self): self._set_color(LED_VERIFY_COLOR)
-    def set_error(self): self._set_color((255, 0, 0)) 
-    def set_off(self): self._set_color((0, 0, 0))
+    def _toggle_blink(self):
+        self._blink_state = not self._blink_state
+        if self._blink_state:
+            self._set_color((255, 0, 0)) # Red
+        else:
+            self._set_color((0, 0, 0))   # Off
+
+    def set_idle(self): 
+        self._blink_timer.stop()
+        self._set_color(LED_IDLE_COLOR)
+        
+    def set_busy(self): 
+        self._blink_timer.stop()
+        self._set_color(LED_VERIFY_COLOR)
+        
+    def set_error(self): 
+        # Start the blink loop for rejections!
+        self._blink_state = True
+        self._set_color((255, 0, 0))
+        if not self._blink_timer.isActive():
+            self._blink_timer.start(300) 
+            
+    def set_off(self): 
+        self._blink_timer.stop()
+        self._set_color((0, 0, 0))
 
     def apply_mode(self, mode: str):
         if mode == "WAITING": self.set_idle()
