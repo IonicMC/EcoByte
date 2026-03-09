@@ -1059,7 +1059,8 @@ class DepositScreen(WaterBackground):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._preview_timer.isActive(): self._preview_timer.start(PREVIEW_INTERVAL_MS)
+        if not self._preview_timer.isActive(): 
+            self._preview_timer.start(33)  # <-- Changed to 33 directly
 
     def hideEvent(self, event):
         super().hideEvent(event); self._preview_timer.stop()
