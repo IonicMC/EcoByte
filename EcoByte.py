@@ -2,7 +2,7 @@ import RPi.GPIO as GPIO
 import time
 
 # Pin configuration
-GPIO_IR = 13
+GPIO_IR = 27
 
 def test_sensor():
     GPIO.setmode(GPIO.BCM)
