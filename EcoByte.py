@@ -150,7 +150,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 90
+PREVIEW_INTERVAL_MS = 33
 
 
 # ============================================================
@@ -888,6 +888,7 @@ class ONNXBottleVerifier:
             self.available = True
             self.reason = "ready"
             print(f"[ONNX] loaded {self.model_path}")
+            self.start()
         except Exception as e:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
@@ -910,24 +911,31 @@ class ONNXBottleVerifier:
         except Exception:
             return None
 
-    def _ensure_reader(self) -> bool:
-        if self._reader_thread is not None and self._reader_thread.is_alive():
-            return True
-        self._reader_running = True
-        self._reader_thread = threading.Thread(target=self._camera_loop, daemon=True)
-        self._reader_thread.start()
-        time.sleep(0.1)
+    def start(self):
+        if not self.available:
+            return False
+        with self._lock:
+            if self._reader_thread is not None and self._reader_thread.is_alive():
+                return True
+            self._reader_running = True
+            self._reader_thread = threading.Thread(target=self._camera_loop, daemon=True)
+            self._reader_thread.start()
         return True
 
     def _camera_loop(self):
         while self._reader_running:
-            if self._cap is None or not self._cap.isOpened():
-                self._cap = self._open_camera()
-                if self._cap is None:
-                    time.sleep(0.3)
+            cap = None
+            with self._lock:
+                cap = self._cap
+            if cap is None or not cap.isOpened():
+                cap = self._open_camera()
+                with self._lock:
+                    self._cap = cap
+                if cap is None:
+                    time.sleep(0.20)
                     continue
 
-            ok, frame = self._cap.read()
+            ok, frame = cap.read()
             if ok and frame is not None:
                 with self._lock:
                     self._latest_frame = frame.copy()
@@ -939,7 +947,7 @@ class ONNXBottleVerifier:
         self._reader_running = False
         try:
             if self._reader_thread is not None:
-                self._reader_thread.join(timeout=0.4)
+                self._reader_thread.join(timeout=0.5)
         except Exception:
             pass
         with self._lock:
@@ -1026,7 +1034,7 @@ class ONNXBottleVerifier:
     def get_preview_qimage(self):
         if not self.available or self._net is None:
             return None
-        self._ensure_reader()
+        self.start()
         frame = self._get_latest_frame_copy()
         if frame is None:
             return self._last_qimage
@@ -1050,9 +1058,9 @@ class ONNXBottleVerifier:
     def quick_detect(self) -> bool:
         if not self.available or self._net is None:
             return False
-        self._ensure_reader()
+        self.start()
         with self._lock:
-            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.30
+            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.35
             if fresh:
                 return bool(self._last_detection)
         frame = self._get_latest_frame_copy()
@@ -1070,14 +1078,14 @@ class ONNXBottleVerifier:
 
     def recent_detection(self) -> bool:
         with self._lock:
-            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.40
+            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.45
             return bool(fresh and self._last_detection)
 
     def verify_once(self) -> bool:
         if not self.available or self._net is None:
             return True
 
-        self._ensure_reader()
+        self.start()
         start = time.monotonic()
         frames = 0
         positives = 0
@@ -1091,9 +1099,10 @@ class ONNXBottleVerifier:
             if frame is None:
                 time.sleep(0.01)
                 continue
+
             sig = int(np.sum(frame) % 1000000)
             if sig == last_sig:
-                time.sleep(0.01)
+                time.sleep(0.008)
                 continue
             last_sig = sig
 
@@ -1114,7 +1123,7 @@ class ONNXBottleVerifier:
                 best_consecutive = max(best_consecutive, consecutive)
             else:
                 consecutive = 0
-            time.sleep(0.02)
+            time.sleep(0.01)
 
         if frames == 0:
             print('[ONNX] no fresh frames during verify; allowing fallback')
