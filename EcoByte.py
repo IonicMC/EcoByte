@@ -85,9 +85,9 @@ GPIO_IR = 27  # BCM 27 is Physical Pin 13
 ULTRA_MIN_CM = 2.0
 ULTRA_MAX_CM = 18.0
 ULTRA_TIMEOUT_S = 0.03
-VERIFY_SECONDS = 1.5      # Give AI 1.5s to confirm if it's a bottle
-IR_DROP_TIMEOUT_S = 3.0   # Generous 3 seconds for the bottle to fall
-COOLDOWN_SECONDS = 2.0    # Prevent double-reads
+VERIFY_SECONDS = 1.5      
+IR_DROP_TIMEOUT_S = 3.0   
+COOLDOWN_SECONDS = 2.0    
 POLL_MS = 60
 
 SERVO_CLOSED_US = 500
@@ -95,7 +95,7 @@ SERVO_OPEN_US = 1200
 
 POINTS_PER_BOTTLE = 5
 
-# WS2812B LED strip (If colors glitch due to audio, change D18 to D10 and rewire!)
+# WS2812B LED strip (MOVED TO D10/SPI TO FIX AUDIO FLICKER)
 LED_COUNT = 60          
 LED_BRIGHTNESS = 0.35   
 LED_IDLE_COLOR = (0, 255, 0)      
@@ -381,7 +381,7 @@ class WaterBackground(QWidget):
         p.drawPath(wave_path(int(h * 0.78), 18, 0.020, 1.4))
 
 # ============================================================
-# Utility UI Classes (Secret Corner, Dialogs, etc)
+# Utility UI Classes
 # ============================================================
 class SecretExitCorner(QPushButton):
     def __init__(self, on_exit, parent=None):
@@ -641,7 +641,7 @@ class ONNXBottleVerifier:
                 self._frame_count += 1
                 if detected and len(kept) > 0: self._needs_tracker_sync = True
                 
-            time.sleep(0.02) # Slightly longer sleep to keep the Pi cool
+            time.sleep(0.02)
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
@@ -734,12 +734,12 @@ class ONNXBottleVerifier:
                 else: consecutive = 0
             time.sleep(0.015)
 
-        if reads == 0: return True
+        if reads == 0: return True 
         accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
         return accepted
 
 # ============================================================
-# Hardware Worker (Includes Reject Logic and Cooldowns)
+# Hardware Worker (Includes Strict Reject Logic)
 # ============================================================
 class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
@@ -758,9 +758,9 @@ class HardwareWorker(QThread):
         self._pi = None
         self._wake_latched = False
         
-        # State locks
         self._in_cooldown = False
         self._waiting_for_removal = False
+        self._clear_start_time = 0.0
         
         self._last_activity_emit = 0.0 
 
@@ -812,9 +812,14 @@ class HardwareWorker(QThread):
 
         try:
             while self.running:
-                # 1. State: Object must be removed before proceeding
+                
+                # 1. State: Object must be fully removed (Debounced for 1.5 seconds)
                 if self._waiting_for_removal:
-                    if not self._object_present():
+                    if self._object_present():
+                        # Keep resetting the clear timer as long as the object is still here
+                        self._clear_start_time = time.monotonic() 
+                    elif (time.monotonic() - self._clear_start_time) > 1.5:
+                        # Sensor has been completely clear for 1.5 continuous seconds
                         self._waiting_for_removal = False
                         self._latched = False
                         self.ui_mode.emit("WAITING")
@@ -829,23 +834,15 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("WAITING")
                     continue
 
-                # Read Sensors
-                ultrasonic_ready = self._object_present()
-                camera_ready = False
-                if self.verifier is not None and getattr(self.verifier, 'available', False):
-                    try: camera_ready = self.verifier.quick_detect()
-                    except Exception: pass
+                # 3. Main Loop: ULTRASONIC ONLY triggers the wake-up (stops camera ghosting)
+                ready = self._object_present()
 
-                ready = camera_ready or ultrasonic_ready
-
-                # Keep UI Awake
                 if ready:
                     now = time.monotonic()
                     if now - self._last_activity_emit > 0.5:
                         self.sensor_activity.emit()
                         self._last_activity_emit = now
 
-                # 3. Main Logic
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     if ready and not self._wake_latched:
@@ -866,10 +863,11 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("VERIFYING")
                     
                     if (time.monotonic() - self._verify_start) >= VERIFY_SECONDS:
-                        allow_drop = True
+                        
+                        allow_drop = False
                         if self.verifier is not None and getattr(self.verifier, 'available', False):
                             try: allow_drop = bool(self.verifier.verify_once())
-                            except Exception: allow_drop = True
+                            except Exception: allow_drop = False
 
                         self._verifying = False
 
@@ -877,6 +875,7 @@ class HardwareWorker(QThread):
                             # === REJECT LOGIC ===
                             self.ui_mode.emit("REJECTED")
                             self._waiting_for_removal = True
+                            self._clear_start_time = time.monotonic() # Start the removal debounce timer
                         else:
                             # === ACCEPT & DROP LOGIC ===
                             self.ui_mode.emit("DROPPING")
@@ -889,7 +888,7 @@ class HardwareWorker(QThread):
                             while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
                                 if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
-                                    time.sleep(0.3) # Give it a fraction to fully clear
+                                    time.sleep(0.3) 
                                     break 
                                 time.sleep(0.01)
                                 
@@ -897,12 +896,12 @@ class HardwareWorker(QThread):
                             
                             if bottle_fell:
                                 self.dropped.emit()
-                                self._in_cooldown = True  # Stop double scanning next bottle
+                                self._in_cooldown = True  
                             else:
-                                # They pulled it back!
                                 print("[ANTI-CHEAT] Bottle pulled back! No points awarded.")
                                 self.ui_mode.emit("REJECTED")
                                 self._waiting_for_removal = True
+                                self._clear_start_time = time.monotonic()
                 else:
                     self.ui_mode.emit("WAITING")
 
@@ -1154,20 +1153,21 @@ class LEDController(QObject):
         self._pixels = None
         if neopixel is None or board is None: return
         try:
-            self._pixels = neopixel.NeoPixel(board.D18, LED_COUNT, brightness=LED_BRIGHTNESS, auto_write=True, pixel_order=neopixel.GRB)
+            # We use D10 here because SPI prevents the PWM audio flickering
+            self._pixels = neopixel.NeoPixel(board.D10, LED_COUNT, brightness=LED_BRIGHTNESS, auto_write=True, pixel_order=neopixel.GRB)
             self.set_idle()
         except Exception: self._pixels = None
 
     def _set_color(self, rgb):
         if self._pixels:
             try:
-                self._pixels.fill((0,0,0)) # Clear first to prevent PWM audio corruption
+                self._pixels.fill((0, 0, 0)) # Clear first to prevent glitches
                 self._pixels.fill(rgb)
             except Exception: pass
 
     def set_idle(self): self._set_color(LED_IDLE_COLOR)
     def set_busy(self): self._set_color(LED_VERIFY_COLOR)
-    def set_error(self): self._set_color((255, 0, 0)) # Red for rejected
+    def set_error(self): self._set_color((255, 0, 0)) # RED for errors/rejections
     def set_off(self): self._set_color((0, 0, 0))
 
     def apply_mode(self, mode: str):
