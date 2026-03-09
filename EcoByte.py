@@ -105,7 +105,7 @@ LED_VERIFY_COLOR = (255, 0, 0)
 BTN_W, BTN_H = 600, 124
 SMALL_BTN_W, SMALL_BTN_H = 320, 98
 
-# Background animation
+# Background animation 
 WATER_FPS_MS = 33
 WAVE_SPEED = 0.08
 WAVE_OPACITY = 0.18
@@ -463,12 +463,13 @@ class ThemedConfirmDialog(QDialog):
         root.addStretch(1); root.addWidget(title_lbl); root.addWidget(msg_lbl)
         root.addStretch(1); root.addLayout(btn_row)
 
+# Bigger, highly visible idle ring
 class IdleRing(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._progress = 1.0
         self._seconds = 0
-        self.setFixedSize(88, 88)
+        self.setFixedSize(140, 140) # Drastically Increased Size
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def set_countdown(self, remaining_ms: int, total_ms: int):
@@ -479,19 +480,23 @@ class IdleRing(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        r = self.rect().adjusted(6, 6, -6, -6)
+        
+        # Adjusted margins for larger size
+        r = self.rect().adjusted(10, 10, -10, -10)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 255, 255, 26)); p.drawEllipse(r)
 
-        track = QPen(QColor(255, 255, 255, 75), 7)
+        # Thicker track
+        track = QPen(QColor(255, 255, 255, 75), 10)
         track.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(track); p.setBrush(Qt.BrushStyle.NoBrush); p.drawArc(r, 0, 360 * 16)
 
-        arc = QPen(QColor(255, 255, 255, 210), 7)
+        arc = QPen(QColor(255, 255, 255, 210), 10)
         arc.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(arc); p.drawArc(r, 90 * 16, int(-360 * 16 * self._progress))
 
-        p.setPen(QColor(255, 255, 255, 230))
-        p.setFont(QFont(FONT_FAMILY, 16, QFont.Weight.Bold))
+        # Larger, brighter font
+        p.setPen(QColor(255, 255, 255, 255))
+        p.setFont(QFont(FONT_FAMILY, 32, QFont.Weight.Bold))
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, str(self._seconds))
 
 class AnimatedNumberLabel(QLabel):
@@ -562,7 +567,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Dual-Threaded ONNX Bottle Verifier (No Tracker)
+# Dual-Threaded ONNX Bottle Verifier (Camera Sleep Mode added)
 # ============================================================
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
@@ -574,6 +579,8 @@ class ONNXBottleVerifier:
         self._net, self._cap = None, None
         self._lock = threading.RLock()
         
+        self._active = False # CAMERA DEFAULTS TO OFF
+        
         self._raw_frame_for_inference = None
         self._latest_bboxes = []
         self._last_detection = False
@@ -581,7 +588,6 @@ class ONNXBottleVerifier:
         self._frame_count = 0
         
         self._preview_qimage = None 
-        
         self.running = False
 
         if not self.enabled: return
@@ -603,6 +609,20 @@ class ONNXBottleVerifier:
             self._inference_thread.start()
         except Exception as e: self.reason = str(e)
 
+    def start_scanning(self):
+        with self._lock:
+            self._active = True
+
+    def stop_scanning(self):
+        with self._lock:
+            self._active = False
+            if self._cap is not None:
+                self._cap.release()
+                self._cap = None
+            self._preview_qimage = None
+            self._raw_frame_for_inference = None
+            self._latest_bboxes = []
+
     def _ensure_camera(self) -> bool:
         if self._cap is not None and self._cap.isOpened(): return True
         try:
@@ -620,14 +640,14 @@ class ONNXBottleVerifier:
 
     def release(self):
         self.running = False
-        with self._lock:
-            try:
-                if self._cap is not None: self._cap.release()
-            except Exception: pass
-            self._cap = None
+        self.stop_scanning()
 
     def _capture_loop(self):
         while self.running:
+            if not self._active:
+                time.sleep(0.2)
+                continue
+                
             if not self._ensure_camera():
                 time.sleep(0.5); continue
                 
@@ -656,6 +676,10 @@ class ONNXBottleVerifier:
 
     def _inference_loop(self):
         while self.running:
+            if not self._active:
+                time.sleep(0.2)
+                continue
+                
             frame_to_infer = None
             with self._lock:
                 if self._raw_frame_for_inference is not None: 
@@ -739,7 +763,7 @@ class ONNXBottleVerifier:
         return accepted
 
 # ============================================================
-# Hardware Worker 
+# Hardware Worker (Bulletproof Ultrasonic Debounce)
 # ============================================================
 class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
@@ -787,13 +811,23 @@ class HardwareWorker(QThread):
             return None
         except Exception: return None
 
-    def _object_present(self):
-        d1 = self._distance_cm()
-        if d1 is None or not (ULTRA_MIN_CM <= d1 <= ULTRA_MAX_CM): return False
-        time.sleep(0.005)
-        d2 = self._distance_cm()
-        if d2 is None: return False
-        return ULTRA_MIN_CM <= d2 <= ULTRA_MAX_CM
+    def _object_present(self, strict=False):
+        """
+        Samples the ultrasonic sensor 4 times to filter out noise.
+        strict=True : Needs 3 out of 4 hits to wake up (Ignores ghost echoes)
+        strict=False: Needs 1 out of 4 hits to stay awake (Prevents false clearing)
+        """
+        hits = 0
+        for _ in range(4):
+            d = self._distance_cm()
+            if d is not None and (ULTRA_MIN_CM <= d <= ULTRA_MAX_CM):
+                hits += 1
+            time.sleep(0.02) # Wait 20ms between pings
+            
+        if strict:
+            return hits >= 3
+        else:
+            return hits >= 1
 
     def run(self):
         GPIO.setwarnings(False); GPIO.setmode(GPIO.BCM)
@@ -813,15 +847,16 @@ class HardwareWorker(QThread):
         try:
             while self.running:
                 
-                # 1. State: Object must be fully removed 
+                # 1. State: Object must be fully removed (Debounced for 2 seconds)
                 if self._waiting_for_removal:
-                    if self._object_present():
+                    # Loose check: If it sees *anything*, reset the clear timer
+                    if self._object_present(strict=False):
                         self._clear_start_time = time.monotonic() 
-                    elif (time.monotonic() - self._clear_start_time) > 1.5:
+                    elif (time.monotonic() - self._clear_start_time) > 2.0:
                         self._waiting_for_removal = False
                         self._latched = False
                         self.ui_mode.emit("WAITING")
-                    self.msleep(100)
+                    self.msleep(50)
                     continue
                 
                 # 2. State: Cooldown block
@@ -832,8 +867,9 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("WAITING")
                     continue
 
-                # 3. Main Loop
-                ready = self._object_present()
+                # 3. Main Loop Wake Check
+                # Strict check: Requires a very solid read to wake up the machine
+                ready = self._object_present(strict=True)
 
                 if ready:
                     now = time.monotonic()
@@ -1183,7 +1219,6 @@ class LEDController(QObject):
         self._set_color(LED_VERIFY_COLOR)
         
     def set_error(self): 
-        # Start the blink loop for rejections!
         self._blink_state = True
         self._set_color((255, 0, 0))
         if not self._blink_timer.isActive():
@@ -1274,10 +1309,11 @@ class Kiosk(QStackedWidget):
         remaining = self.idle_timer.remainingTime()
         if remaining < 0: remaining = IDLE_TIMEOUT_MS
         
+        # Only show the countdown ring in the last 10 seconds!
         if remaining <= 10000:
             if self.idle_indicator.isHidden(): 
                 self.idle_indicator.show()
-            # CRITICAL FIX: Force the widget to the absolute top layer so screens don't cover it
+            # Force the widget to the absolute top layer so screens don't cover it
             self.idle_indicator.raise_()
             self.idle_indicator.set_countdown(remaining, 10000)
         else:
@@ -1286,7 +1322,12 @@ class Kiosk(QStackedWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "idle_indicator"): self.idle_indicator.move(self.width() - self.idle_indicator.width() - 22, 22); self.idle_indicator.raise_()
+        if hasattr(self, "idle_indicator"): 
+            # Place it cleanly in the top right corner with a 50px margin
+            x_pos = self.width() - self.idle_indicator.width() - 50
+            y_pos = 50
+            self.idle_indicator.move(x_pos, y_pos)
+            self.idle_indicator.raise_()
 
     def confirm_back_from_deposit(self):
         self.snd.tap()
@@ -1300,16 +1341,22 @@ class Kiosk(QStackedWidget):
         else: self.reset_idle()
 
     def go_main(self):
-        self.worker.set_session(False); self.led.set_idle(); self.session_bottles = 0; self.deposit.animate_counts(0); self.setCurrentWidget(self.main); self.reset_idle()
+        self.worker.set_session(False); self.led.set_idle(); self.session_bottles = 0; self.deposit.animate_counts(0); self.setCurrentWidget(self.main)
+        self.verifier.stop_scanning() # Camera sleeps
+        self.reset_idle()
 
     def start_session_from_sensor(self):
         if self.currentWidget() is self.main: self.start_session()
 
     def start_session(self):
-        self.session_bottles = 0; self.deposit.animate_counts(0); self.worker.set_session(True); self.setCurrentWidget(self.deposit); self.reset_idle()
+        self.session_bottles = 0; self.deposit.animate_counts(0); self.worker.set_session(True); self.setCurrentWidget(self.deposit)
+        self.verifier.start_scanning() # Camera wakes up!
+        self.reset_idle()
 
     def go_redeem(self):
-        self.worker.set_session(False); self.led.set_idle(); self.setCurrentWidget(self.redeem); self.reset_idle()
+        self.worker.set_session(False); self.led.set_idle(); self.setCurrentWidget(self.redeem)
+        self.verifier.stop_scanning() # Camera sleeps
+        self.reset_idle()
 
     def on_bottle_dropped(self):
         self.session_bottles += 1; self.deposit.animate_counts(self.session_bottles)
@@ -1318,6 +1365,7 @@ class Kiosk(QStackedWidget):
 
     def finish_session(self):
         self.worker.set_session(False); self.led.set_idle()
+        self.verifier.stop_scanning() # Camera sleeps
         if self.session_bottles <= 0: return self.go_main()
         points = self.session_bottles * POINTS_PER_BOTTLE
         token_id = "ECO" + uuid.uuid4().hex[:12]
