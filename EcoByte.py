@@ -1,53 +1,35 @@
-import serial
-import time
+import requests
 
-USB_PORT = "/dev/ttyUSB0"
-BAUD_RATE = 9600
+# --- CONFIGURATION ---
+SEMAPHORE_API_KEY = "6ae5cec324c152ff42011d3aa598b26a"  # Your API key from the screenshot
+PHONE_NUMBER = "09694837544"                            # <-- REPLACE THIS with your real Globe/Smart/DITO number
+MESSAGE = "EcoByte Alert: ₱10 Load has been successfully credited to your number! Thank you for recycling."
 
-def jumpstart_module():
-    print(f"Attempting to jumpstart LC SIM800C V3 on {USB_PORT}...")
+def test_semaphore_sms():
+    print(f"Sending Web API request to Semaphore for {PHONE_NUMBER}...")
+    
+    url = "https://api.semaphore.co/api/v4/messages"
+    payload = {
+        "apikey": SEMAPHORE_API_KEY,
+        "number": PHONE_NUMBER,
+        "message": MESSAGE
+    }
     
     try:
-        # Open the serial port
-        ser = serial.Serial(USB_PORT, BAUD_RATE, timeout=1)
+        # Send the request to Semaphore
+        response = requests.post(url, data=payload, timeout=5)
         
-        # --- THE DIGITAL POWER BUTTON PRESS ---
-        print("Holding the virtual power button...")
-        ser.dtr = True
-        ser.rts = True
-        time.sleep(2)  # Hold for 2 seconds
-        
-        print("Releasing the power button...")
-        ser.dtr = False
-        ser.rts = False
-        time.sleep(2)  # Wait for it to boot
-        
-        # --------------------------------------
-        
-        print("\nSending 'AT' Wake-up calls...")
-        # Spam AT to sync the baud rate
-        for i in range(5):
-            ser.write(b"AT\r\n")
-            time.sleep(0.5)
+        # Check if it was successful
+        if response.status_code == 200:
+            print("\nSUCCESS! Semaphore accepted the request.")
+            print("Check your phone inbox!")
+            print(f"Semaphore Server Reply: {response.json()}")
+        else:
+            print(f"\nERROR: Semaphore rejected it. Code: {response.status_code}")
+            print(f"Reply: {response.text}")
             
-            response = ""
-            while ser.in_waiting > 0:
-                response += ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
-            
-            if response.strip():
-                print(f"Response: {response.strip()}")
-                
-            if "OK" in response:
-                print("\nSUCCESS! The chip is awake and responding!")
-                ser.close()
-                return
-
-        print("\nFailed to get 'OK'. Look at the USB module, is the LED flashing?")
-        ser.close()
-
-    except serial.SerialException as e:
-        print(f"Error opening port: {e}")
-        print("Make sure you are running this with: sudo python jumpstart.py")
+    except requests.exceptions.RequestException as e:
+        print(f"\nNetwork Error: Could not reach Semaphore. Check Wi-Fi.\nDetails: {e}")
 
 if __name__ == "__main__":
-    jumpstart_module()
+    test_semaphore_sms()
