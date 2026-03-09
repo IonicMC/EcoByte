@@ -151,7 +151,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 220
+PREVIEW_INTERVAL_MS = 125
 
 
 # ============================================================
@@ -875,8 +875,9 @@ class ONNXBottleVerifier:
         self._last_qimage = None
         self._last_detection = False
         self._last_conf = 0.0
+        self._last_kept = []
         self._last_preview_infer_ts = 0.0
-        self._preview_infer_interval_s = 0.25
+        self._preview_infer_interval_s = 0.12
 
         if not self.enabled:
             return
@@ -901,6 +902,16 @@ class ONNXBottleVerifier:
             return True
         try:
             self._cap = cv2.VideoCapture(CAMERA_INDEX)
+            try:
+                self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            except Exception:
+                pass
+            try:
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self._cap.set(cv2.CAP_PROP_FPS, 30)
+            except Exception:
+                pass
             try:
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
@@ -996,18 +1007,21 @@ class ONNXBottleVerifier:
         try:
             if not self._ensure_camera():
                 return self._last_qimage
-            now = time.monotonic()
-            if self._last_qimage is not None and (now - self._last_preview_infer_ts) < self._preview_infer_interval_s:
-                return self._last_qimage
+
             ok, frame = self._cap.read()
             if not ok or frame is None:
                 return self._last_qimage
-            kept, detected, best_conf = self._run_model(frame)
-            annotated = self._annotate(frame, kept)
+
+            now = time.monotonic()
+            if (now - self._last_preview_infer_ts) >= self._preview_infer_interval_s:
+                kept, detected, best_conf = self._run_model(frame)
+                self._last_kept = kept
+                self._last_detection = detected
+                self._last_conf = best_conf
+                self._last_preview_infer_ts = now
+
+            annotated = self._annotate(frame.copy(), self._last_kept)
             self._store_qimage(annotated)
-            self._last_detection = detected
-            self._last_conf = best_conf
-            self._last_preview_infer_ts = now
             return self._last_qimage
         finally:
             self._lock.release()
