@@ -98,7 +98,7 @@ ULTRA_MIN_CM = 2.0
 ULTRA_MAX_CM = 18.0
 ULTRA_TIMEOUT_S = 0.03
 VERIFY_SECONDS = 1.0
-POLL_MS = 45
+POLL_MS = 60
 CLEAR_BOTH_TIMEOUT_S = 2.0
 
 SERVO_CLOSED_US = 500
@@ -120,12 +120,12 @@ SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
 # Background animation
-WATER_FPS_MS = 33
+WATER_FPS_MS = 50
 WAVE_SPEED = 0.092
 WAVE_OPACITY = 0.18
 
 # Falling bottles
-BOTTLE_COUNT = 12
+BOTTLE_COUNT = 8
 BOTTLE_ALPHA = 44
 BOTTLE_SPEED_MIN = 0.75
 BOTTLE_SPEED_MAX = 1.9
@@ -139,11 +139,13 @@ USE_ONNX_VERIFIER = True
 ONNX_MODEL_PATH = "best.onnx"
 CAMERA_INDEX = 0
 ONNX_INPUT_SIZE = 640
-ONNX_CONF_THRESHOLD = 0.45
+ONNX_CONF_THRESHOLD = 0.40
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
-ONNX_VERIFY_RATIO = 0.35
+ONNX_VERIFY_RATIO = 0.18
+ONNX_MIN_POSITIVES = 3
+PREVIEW_INTERVAL_MS = 140
 
 
 # ============================================================
@@ -1005,8 +1007,10 @@ class ONNXBottleVerifier:
                 return True
 
             ratio = positives / frames
-            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f}')
-            return ratio >= ONNX_VERIFY_RATIO
+            needed = max(ONNX_MIN_POSITIVES, int(math.ceil(frames * ONNX_VERIFY_RATIO)))
+            accepted = positives >= needed or (best >= 0.85 and positives >= 2)
+            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} needed={needed} accepted={accepted}')
+            return accepted
 
 # ============================================================
 # Hardware Worker
@@ -1199,7 +1203,7 @@ class BouncingArrow(QWidget):
         self._dir = 1
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(16)
+        self._timer.start(33)
         self.setFixedHeight(260)
 
     def _tick(self):
@@ -1384,54 +1388,80 @@ class DepositScreen(WaterBackground):
         self.verifier = verifier
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(70, 70, 70, 50)
-        root.setSpacing(12)
+        root.setContentsMargins(70, 60, 70, 44)
+        root.setSpacing(10)
 
         header = QLabel("Insert Bottle")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setFont(QFont(FONT_FAMILY, 60, QFont.Weight.Bold))
+        header.setFont(QFont(FONT_FAMILY, 62, QFont.Weight.Bold))
         header.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.status = QLabel("Waiting for bottle...")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status.setFont(QFont(FONT_FAMILY, 28))
-        self.status.setStyleSheet("color: rgba(255,255,255,0.90);")
+        self.status.setStyleSheet("color: rgba(255,255,255,0.92);")
 
         card = make_card()
-        card.setFixedHeight(650)
-        card.setFixedWidth(900)
+        card.setFixedHeight(700)
+        card.setFixedWidth(980)
         cl = QVBoxLayout(card)
-        cl.setContentsMargins(40, 34, 40, 34)
+        cl.setContentsMargins(36, 28, 36, 30)
         cl.setSpacing(16)
 
-        self.camera_title = QLabel("Camera Verification")
-        self.camera_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.camera_title.setFont(QFont(FONT_FAMILY, 22, QFont.Weight.Bold))
-        self.camera_title.setStyleSheet("color: rgba(255,255,255,0.90);")
-
         self.camera_label = QLabel()
-        self.camera_label.setFixedSize(760, 300)
+        self.camera_label.setFixedSize(860, 470)
         self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_label.setStyleSheet(
-            "background: rgba(0,0,0,0.22); border: 2px solid rgba(255,255,255,0.18); border-radius: 24px; color: rgba(255,255,255,0.70);"
+            "background: rgba(0,0,0,0.18); border: 2px solid rgba(255,255,255,0.18); border-radius: 28px; color: rgba(255,255,255,0.72); font-size: 26px;"
         )
         self.camera_label.setText("Camera preview will appear here")
 
-        self.bottles_lbl = AnimatedNumberLabel("Bottles: ")
-        self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 48, QFont.Weight.Bold))
-        self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
+        counts_row = QHBoxLayout()
+        counts_row.setSpacing(24)
 
-        self.points_lbl = AnimatedNumberLabel("EcoPoints: ")
+        counts_card_1 = QWidget()
+        counts_card_1.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;")
+        counts_card_1.setFixedHeight(110)
+        counts_l1 = QVBoxLayout(counts_card_1)
+        counts_l1.setContentsMargins(12, 10, 12, 10)
+        counts_l1.setSpacing(4)
+        lbl1 = QLabel("Accepted Bottles")
+        lbl1.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl1.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
+        lbl1.setStyleSheet("color: rgba(255,255,255,0.80);")
+        self.bottles_lbl = AnimatedNumberLabel("")
+        self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
+        self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
+        self.bottles_lbl.setText("0")
+        counts_l1.addWidget(lbl1)
+        counts_l1.addWidget(self.bottles_lbl)
+
+        counts_card_2 = QWidget()
+        counts_card_2.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;")
+        counts_card_2.setFixedHeight(110)
+        counts_l2 = QVBoxLayout(counts_card_2)
+        counts_l2.setContentsMargins(12, 10, 12, 10)
+        counts_l2.setSpacing(4)
+        lbl2 = QLabel("EcoPoints")
+        lbl2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl2.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
+        lbl2.setStyleSheet("color: rgba(255,255,255,0.80);")
+        self.points_lbl = AnimatedNumberLabel("")
         self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.points_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
         self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);")
+        self.points_lbl.setText("0")
+        counts_l2.addWidget(lbl2)
+        counts_l2.addWidget(self.points_lbl)
 
-        cl.addWidget(self.camera_title)
+        counts_row.addWidget(counts_card_1)
+        counts_row.addWidget(counts_card_2)
+
+        cl.addStretch(1)
         cl.addWidget(self.camera_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addSpacing(8)
-        cl.addWidget(self.bottles_lbl)
-        cl.addWidget(self.points_lbl)
+        cl.addLayout(counts_row)
+        cl.addStretch(1)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(18)
@@ -1450,13 +1480,14 @@ class DepositScreen(WaterBackground):
 
         root.addWidget(header)
         root.addWidget(self.status)
+        root.addStretch(1)
         root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addStretch(1)
         root.addLayout(btn_row)
 
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._update_preview)
-        self._preview_timer.start(90)
+        self._preview_timer.start(PREVIEW_INTERVAL_MS)
 
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
         self._corner.move(0, 0)
@@ -1470,7 +1501,7 @@ class DepositScreen(WaterBackground):
         pm = QPixmap.fromImage(qimg).scaled(
             self.camera_label.size(),
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
+            Qt.TransformationMode.FastTransformation
         )
         self.camera_label.setPixmap(pm)
 
@@ -1478,7 +1509,7 @@ class DepositScreen(WaterBackground):
         if mode == "WAITING":
             self.status.setText("Waiting for bottle...")
         elif mode == "VERIFYING":
-            self.status.setText("Confirming bottle... Please hold it steady")
+            self.status.setText("Confirming bottle... Hold it steady for 1 second")
         elif mode == "DROPPING":
             self.status.setText("Bottle accepted. Processing...")
 
