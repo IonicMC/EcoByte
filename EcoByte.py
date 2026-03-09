@@ -1059,7 +1059,7 @@ class HardwareWorker(QThread):
                             gate_duration = GATE_OPEN_MS / 1000.0
                             
                             while (time.monotonic() - drop_start) < gate_duration:
-                                if GPIO.input(GPIO_IR) == GPIO.LOW: bottle_fell = True
+                                if GPIO.input(GPIO_IR) == GPIO.HIGH: bottle_fell = True
                                 time.sleep(0.01)
                                 
                             servo_pulse(SERVO_CLOSED_US, hold=True)
