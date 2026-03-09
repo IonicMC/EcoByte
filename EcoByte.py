@@ -11,6 +11,7 @@ os.environ["QT_IM_MODULE"] = "none"
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
 os.environ["QT_SCALE_FACTOR"] = "1"
 os.environ["QT_FONT_DPI"] = "96"
+os.environ["OPENCV_VIDEOIO_PRIORITY_GSTREAMER"] = "0"
 
 import sys
 import time
@@ -29,14 +30,15 @@ import requests
 try:
     import cv2
     import numpy as np
-    try:
-        cv2.setNumThreads(1)
-        cv2.ocl.setUseOpenCL(False)
-    except Exception:
-        pass
 except Exception:
     cv2 = None
     np = None
+
+if cv2 is not None:
+    try:
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
 
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, pyqtProperty, QPropertyAnimation,
@@ -125,12 +127,12 @@ SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
 # Background animation
-WATER_FPS_MS = 66
+WATER_FPS_MS = 90
 WAVE_SPEED = 0.092
 WAVE_OPACITY = 0.18
 
 # Falling bottles
-BOTTLE_COUNT = 5
+BOTTLE_COUNT = 3
 BOTTLE_ALPHA = 44
 BOTTLE_SPEED_MIN = 0.75
 BOTTLE_SPEED_MAX = 1.9
@@ -150,7 +152,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 33
+PREVIEW_INTERVAL_MS = 220
 
 
 # ============================================================
@@ -424,7 +426,15 @@ class WaterBackground(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(WATER_FPS_MS)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._timer.start(WATER_FPS_MS)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
 
     def _tick(self):
         self._phase += WAVE_SPEED
@@ -867,12 +877,7 @@ class ONNXBottleVerifier:
         self._last_detection = False
         self._last_conf = 0.0
         self._last_preview_infer_ts = 0.0
-        self._preview_infer_interval_s = 0.12
-        self._last_kept = []
-        self._last_frame_ts = 0.0
-        self._latest_frame = None
-        self._reader_thread = None
-        self._reader_running = False
+        self._preview_infer_interval_s = 0.25
 
         if not self.enabled:
             return
@@ -888,68 +893,58 @@ class ONNXBottleVerifier:
             self.available = True
             self.reason = "ready"
             print(f"[ONNX] loaded {self.model_path}")
-            self.start()
         except Exception as e:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
 
-    def _open_camera(self):
+    def _ensure_camera(self) -> bool:
+        if self._cap is not None and self._cap.isOpened():
+            return True
         try:
-            cap = cv2.VideoCapture(CAMERA_INDEX)
+            cap = None
             try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap.set(cv2.CAP_PROP_FPS, 30)
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                cap = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_V4L2)
+            except Exception:
+                cap = None
+            if cap is None or not cap.isOpened():
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+                cap = cv2.VideoCapture(CAMERA_INDEX)
+
+            self._cap = cap
+            if self._cap is None:
+                return False
+
+            try:
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self._cap.set(cv2.CAP_PROP_FPS, 30)
+                self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             except Exception:
                 pass
+
             start = time.monotonic()
-            while not cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
+            while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
                 time.sleep(0.05)
-            return cap if cap.isOpened() else None
-        except Exception:
-            return None
 
-    def start(self):
-        if not self.available:
-            return False
-        with self._lock:
-            if self._reader_thread is not None and self._reader_thread.is_alive():
-                return True
-            self._reader_running = True
-            self._reader_thread = threading.Thread(target=self._camera_loop, daemon=True)
-            self._reader_thread.start()
-        return True
+            if not self._cap.isOpened():
+                return False
 
-    def _camera_loop(self):
-        while self._reader_running:
-            cap = None
-            with self._lock:
-                cap = self._cap
-            if cap is None or not cap.isOpened():
-                cap = self._open_camera()
-                with self._lock:
-                    self._cap = cap
-                if cap is None:
-                    time.sleep(0.20)
-                    continue
-
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                with self._lock:
-                    self._latest_frame = frame.copy()
-                    self._last_frame_ts = time.monotonic()
-            else:
+            # Warm up the camera and flush stale frames.
+            warm_end = time.monotonic() + 0.35
+            while time.monotonic() < warm_end:
+                self._cap.read()
                 time.sleep(0.01)
+            return True
+        except Exception:
+            self._cap = None
+            return False
 
     def release(self):
-        self._reader_running = False
-        try:
-            if self._reader_thread is not None:
-                self._reader_thread.join(timeout=0.5)
-        except Exception:
-            pass
         with self._lock:
             try:
                 if self._cap is not None:
@@ -957,13 +952,6 @@ class ONNXBottleVerifier:
             except Exception:
                 pass
             self._cap = None
-            self._latest_frame = None
-
-    def _get_latest_frame_copy(self):
-        with self._lock:
-            if self._latest_frame is None:
-                return None
-            return self._latest_frame.copy()
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
@@ -1034,105 +1022,85 @@ class ONNXBottleVerifier:
     def get_preview_qimage(self):
         if not self.available or self._net is None:
             return None
-        self.start()
-        frame = self._get_latest_frame_copy()
-        if frame is None:
+        if not self._lock.acquire(blocking=False):
             return self._last_qimage
-
-        now = time.monotonic()
-        if (now - self._last_preview_infer_ts) >= self._preview_infer_interval_s:
+        try:
+            if not self._ensure_camera():
+                return self._last_qimage
+            now = time.monotonic()
+            if self._last_qimage is not None and (now - self._last_preview_infer_ts) < self._preview_infer_interval_s:
+                return self._last_qimage
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return self._last_qimage
             kept, detected, best_conf = self._run_model(frame)
-            with self._lock:
-                self._last_kept = kept
-                self._last_detection = detected
-                self._last_conf = best_conf
-                self._last_preview_infer_ts = now
-        else:
-            with self._lock:
-                kept = list(self._last_kept)
-
-        annotated = self._annotate(frame, kept)
-        self._store_qimage(annotated)
-        return self._last_qimage
+            annotated = self._annotate(frame, kept)
+            self._store_qimage(annotated)
+            self._last_detection = detected
+            self._last_conf = best_conf
+            self._last_preview_infer_ts = now
+            return self._last_qimage
+        finally:
+            self._lock.release()
 
     def quick_detect(self) -> bool:
         if not self.available or self._net is None:
             return False
-        self.start()
         with self._lock:
-            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.35
-            if fresh:
-                return bool(self._last_detection)
-        frame = self._get_latest_frame_copy()
-        if frame is None:
-            return False
-        kept, detected, best_conf = self._run_model(frame)
-        with self._lock:
-            self._last_kept = kept
+            if not self._ensure_camera():
+                return False
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return False
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
+            self._store_qimage(annotated)
             self._last_detection = detected
             self._last_conf = best_conf
-            self._last_preview_infer_ts = time.monotonic()
-        annotated = self._annotate(frame, kept)
-        self._store_qimage(annotated)
-        return detected
-
-    def recent_detection(self) -> bool:
-        with self._lock:
-            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.45
-            return bool(fresh and self._last_detection)
+            return detected
 
     def verify_once(self) -> bool:
         if not self.available or self._net is None:
             return True
 
-        self.start()
-        start = time.monotonic()
-        frames = 0
-        positives = 0
-        best = 0.0
-        consecutive = 0
-        best_consecutive = 0
-        last_sig = None
+        with self._lock:
+            if not self._ensure_camera():
+                print('[ONNX] camera failed to open; allowing fallback')
+                return True
 
-        while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
-            frame = self._get_latest_frame_copy()
-            if frame is None:
-                time.sleep(0.01)
-                continue
+            start = time.monotonic()
+            frames = 0
+            positives = 0
+            best = 0.0
+            consecutive = 0
+            best_consecutive = 0
 
-            sig = int(np.sum(frame) % 1000000)
-            if sig == last_sig:
-                time.sleep(0.008)
-                continue
-            last_sig = sig
+            while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
+                ok, frame = self._cap.read()
+                if not ok or frame is None:
+                    time.sleep(0.01)
+                    continue
+                kept, detected, conf = self._run_model(frame)
+                annotated = self._annotate(frame, kept)
+                self._store_qimage(annotated)
+                frames += 1
+                best = max(best, conf)
+                if detected:
+                    positives += 1
+                    consecutive += 1
+                    best_consecutive = max(best_consecutive, consecutive)
+                else:
+                    consecutive = 0
+                time.sleep(0.015)
 
-            kept, detected, conf = self._run_model(frame)
-            annotated = self._annotate(frame, kept)
-            self._store_qimage(annotated)
-            with self._lock:
-                self._last_kept = kept
-                self._last_detection = detected
-                self._last_conf = conf
-                self._last_preview_infer_ts = time.monotonic()
+            if frames == 0:
+                print('[ONNX] no frames during verify; allowing fallback')
+                return True
 
-            frames += 1
-            best = max(best, conf)
-            if detected:
-                positives += 1
-                consecutive += 1
-                best_consecutive = max(best_consecutive, consecutive)
-            else:
-                consecutive = 0
-            time.sleep(0.01)
-
-        if frames == 0:
-            print('[ONNX] no fresh frames during verify; allowing fallback')
-            return True
-
-        ratio = positives / frames
-        accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
-        print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
-        return accepted
+            ratio = positives / frames
+            accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
+            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
+            return accepted
 
 
 # ============================================================
@@ -1143,7 +1111,6 @@ class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
     dropped = pyqtSignal()
     wake_requested = pyqtSignal()
-    chute_activity = pyqtSignal()
 
     def __init__(self, verifier=None):
         super().__init__()
@@ -1237,16 +1204,12 @@ class HardwareWorker(QThread):
 
                 if self.verifier is not None and getattr(self.verifier, 'available', False):
                     try:
-                        camera_ready = self.verifier.recent_detection()
-                        if (not camera_ready) and ultrasonic_ready:
-                            camera_ready = self.verifier.quick_detect()
+                        camera_ready = self.verifier.quick_detect()
                     except Exception as e:
                         print(f"[VERIFY] quick detect error: {e}")
                         camera_ready = False
 
                 ready = camera_ready or ultrasonic_ready
-                if ready:
-                    self.chute_activity.emit()
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -1333,8 +1296,16 @@ class BouncingArrow(QWidget):
         self._dir = 1
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(45)
         self.setFixedHeight(260)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._timer.start(60)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
 
     def _tick(self):
         self._offset += 0.8 * self._dir
@@ -1617,12 +1588,22 @@ class DepositScreen(WaterBackground):
 
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._update_preview)
-        self._preview_timer.start(PREVIEW_INTERVAL_MS)
 
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
         self._corner.move(0, 0)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._preview_timer.isActive():
+            self._preview_timer.start(PREVIEW_INTERVAL_MS)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._preview_timer.stop()
+
     def _update_preview(self):
+        if not self.isVisible():
+            return
         if self.verifier is None or not getattr(self.verifier, 'available', False):
             return
         qimg = self.verifier.get_preview_qimage()
@@ -1634,17 +1615,6 @@ class DepositScreen(WaterBackground):
             Qt.TransformationMode.FastTransformation
         )
         self.camera_label.setPixmap(pm)
-
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if hasattr(self, '_preview_timer'):
-            self._preview_timer.start(PREVIEW_INTERVAL_MS)
-
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        if hasattr(self, '_preview_timer'):
-            self._preview_timer.stop()
 
     def set_mode(self, mode: str):
         if mode == "WAITING":
@@ -1992,7 +1962,6 @@ class Kiosk(QStackedWidget):
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
         self.worker.wake_requested.connect(self.start_session_from_sensor)
-        self.worker.chute_activity.connect(self.reset_idle)
         self.worker.start()
 
         self.redeem.scanned_text.connect(self.on_redeem_scanned)
@@ -2005,7 +1974,7 @@ class Kiosk(QStackedWidget):
 
         self._idle_visual_timer = QTimer(self)
         self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
-        self._idle_visual_timer.start(160)
+        self._idle_visual_timer.start(150)
 
         self.reset_idle()
 
