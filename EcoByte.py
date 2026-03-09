@@ -1261,20 +1261,20 @@ class Kiosk(QStackedWidget):
         self._filter = IdleEventFilter(); self._filter.activity.connect(self.reset_idle)
         QApplication.instance().installEventFilter(self._filter)
 
-    def reset_idle(self):
-        self.idle_timer.start(IDLE_TIMEOUT_MS)
-        self.update_idle_indicator()
-
     def update_idle_indicator(self):
         if not hasattr(self, "idle_indicator"): return
         remaining = self.idle_timer.remainingTime()
         if remaining < 0: remaining = IDLE_TIMEOUT_MS
         
         if remaining <= 10000:
-            if self.idle_indicator.isHidden(): self.idle_indicator.show()
+            if self.idle_indicator.isHidden(): 
+                self.idle_indicator.show()
+            # CRITICAL FIX: Force the widget to the absolute top layer so screens don't cover it
+            self.idle_indicator.raise_()
             self.idle_indicator.set_countdown(remaining, 10000)
         else:
-            if not self.idle_indicator.isHidden(): self.idle_indicator.hide()
+            if not self.idle_indicator.isHidden(): 
+                self.idle_indicator.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
