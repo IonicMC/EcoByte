@@ -150,7 +150,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 70
+PREVIEW_INTERVAL_MS = 33
 
 
 # ============================================================
@@ -867,8 +867,10 @@ class ONNXBottleVerifier:
         self._last_detection = False
         self._last_conf = 0.0
         self._last_preview_infer_ts = 0.0
-        self._preview_infer_interval_s = 0.12
+        self._preview_infer_interval_s = 0.18
         self._last_kept = []
+        self._last_frame_ts = 0.0
+        self._last_preview_ok = False
 
         if not self.enabled:
             return
@@ -895,6 +897,10 @@ class ONNXBottleVerifier:
             self._cap = cv2.VideoCapture(CAMERA_INDEX)
             try:
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self._cap.set(cv2.CAP_PROP_FPS, 30)
+                self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             except Exception:
                 pass
             start = time.monotonic()
@@ -987,10 +993,12 @@ class ONNXBottleVerifier:
             if not self._ensure_camera():
                 return self._last_qimage
             ok, frame = self._cap.read()
-            if not ok or frame is None:
+            self._last_preview_ok = bool(ok and frame is not None)
+            if not self._last_preview_ok:
                 return self._last_qimage
 
             now = time.monotonic()
+            self._last_frame_ts = now
             if (now - self._last_preview_infer_ts) >= self._preview_infer_interval_s:
                 kept, detected, best_conf = self._run_model(frame)
                 self._last_kept = kept
@@ -1006,17 +1014,27 @@ class ONNXBottleVerifier:
         if not self.available or self._net is None:
             return False
         with self._lock:
+            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.35
+            if fresh:
+                return bool(self._last_detection)
             if not self._ensure_camera():
                 return False
             ok, frame = self._cap.read()
             if not ok or frame is None:
                 return False
             kept, detected, best_conf = self._run_model(frame)
-            annotated = self._annotate(frame, kept)
-            self._store_qimage(annotated)
+            self._last_kept = kept
             self._last_detection = detected
             self._last_conf = best_conf
+            self._last_preview_infer_ts = time.monotonic()
+            annotated = self._annotate(frame, kept)
+            self._store_qimage(annotated)
             return detected
+
+    def recent_detection(self) -> bool:
+        with self._lock:
+            fresh = (time.monotonic() - self._last_preview_infer_ts) <= 0.40
+            return bool(fresh and self._last_detection)
 
     def verify_once(self) -> bool:
         if not self.available or self._net is None:
@@ -1070,6 +1088,7 @@ class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
     dropped = pyqtSignal()
     wake_requested = pyqtSignal()
+    chute_activity = pyqtSignal()
 
     def __init__(self, verifier=None):
         super().__init__()
@@ -1163,12 +1182,16 @@ class HardwareWorker(QThread):
 
                 if self.verifier is not None and getattr(self.verifier, 'available', False):
                     try:
-                        camera_ready = self.verifier.quick_detect()
+                        camera_ready = self.verifier.recent_detection()
+                        if (not camera_ready) and ultrasonic_ready:
+                            camera_ready = self.verifier.quick_detect()
                     except Exception as e:
                         print(f"[VERIFY] quick detect error: {e}")
                         camera_ready = False
 
                 ready = camera_ready or ultrasonic_ready
+                if ready:
+                    self.chute_activity.emit()
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -1557,6 +1580,17 @@ class DepositScreen(WaterBackground):
         )
         self.camera_label.setPixmap(pm)
 
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, '_preview_timer'):
+            self._preview_timer.start(PREVIEW_INTERVAL_MS)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, '_preview_timer'):
+            self._preview_timer.stop()
+
     def set_mode(self, mode: str):
         if mode == "WAITING":
             self.status.setText("Waiting for bottle...")
@@ -1903,6 +1937,7 @@ class Kiosk(QStackedWidget):
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
         self.worker.wake_requested.connect(self.start_session_from_sensor)
+        self.worker.chute_activity.connect(self.reset_idle)
         self.worker.start()
 
         self.redeem.scanned_text.connect(self.on_redeem_scanned)
@@ -1915,7 +1950,7 @@ class Kiosk(QStackedWidget):
 
         self._idle_visual_timer = QTimer(self)
         self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
-        self._idle_visual_timer.start(100)
+        self._idle_visual_timer.start(160)
 
         self.reset_idle()
 
