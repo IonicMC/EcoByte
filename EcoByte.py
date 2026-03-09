@@ -126,12 +126,12 @@ SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
 # Background animation
-WATER_FPS_MS = 120
+WATER_FPS_MS = 90
 WAVE_SPEED = 0.092
 WAVE_OPACITY = 0.18
 
 # Falling bottles
-BOTTLE_COUNT = 2
+BOTTLE_COUNT = 3
 BOTTLE_ALPHA = 44
 BOTTLE_SPEED_MIN = 0.75
 BOTTLE_SPEED_MAX = 1.9
@@ -151,7 +151,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 33
+PREVIEW_INTERVAL_MS = 220
 
 
 # ============================================================
@@ -876,9 +876,7 @@ class ONNXBottleVerifier:
         self._last_detection = False
         self._last_conf = 0.0
         self._last_preview_infer_ts = 0.0
-        self._preview_infer_interval_s = 0.12
-        self._last_kept = []
-        self._last_frame_size = None
+        self._preview_infer_interval_s = 0.25
 
         if not self.enabled:
             return
@@ -905,10 +903,6 @@ class ONNXBottleVerifier:
             self._cap = cv2.VideoCapture(CAMERA_INDEX)
             try:
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                self._cap.set(cv2.CAP_PROP_FPS, 30)
-                self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             except Exception:
                 pass
             start = time.monotonic()
@@ -1002,22 +996,18 @@ class ONNXBottleVerifier:
         try:
             if not self._ensure_camera():
                 return self._last_qimage
-
+            now = time.monotonic()
+            if self._last_qimage is not None and (now - self._last_preview_infer_ts) < self._preview_infer_interval_s:
+                return self._last_qimage
             ok, frame = self._cap.read()
             if not ok or frame is None:
                 return self._last_qimage
-
-            now = time.monotonic()
-            if (now - self._last_preview_infer_ts) >= self._preview_infer_interval_s:
-                kept, detected, best_conf = self._run_model(frame)
-                self._last_kept = kept
-                self._last_detection = detected
-                self._last_conf = best_conf
-                self._last_preview_infer_ts = now
-                self._last_frame_size = frame.shape[:2]
-
-            annotated = self._annotate(frame.copy(), self._last_kept)
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
             self._store_qimage(annotated)
+            self._last_detection = detected
+            self._last_conf = best_conf
+            self._last_preview_infer_ts = now
             return self._last_qimage
         finally:
             self._lock.release()
@@ -1057,11 +1047,10 @@ class ONNXBottleVerifier:
             while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
                 ok, frame = self._cap.read()
                 if not ok or frame is None:
-                    time.sleep(0.005)
+                    time.sleep(0.01)
                     continue
                 kept, detected, conf = self._run_model(frame)
-                self._last_kept = kept
-                annotated = self._annotate(frame.copy(), kept)
+                annotated = self._annotate(frame, kept)
                 self._store_qimage(annotated)
                 frames += 1
                 best = max(best, conf)
@@ -1071,7 +1060,7 @@ class ONNXBottleVerifier:
                     best_consecutive = max(best_consecutive, consecutive)
                 else:
                     consecutive = 0
-                time.sleep(0.005)
+                time.sleep(0.015)
 
             if frames == 0:
                 print('[ONNX] no frames during verify; allowing fallback')
@@ -1288,7 +1277,7 @@ class BouncingArrow(QWidget):
         self._timer.stop()
 
     def _tick(self):
-        self._offset += 0.7 * self._dir
+        self._offset += 0.8 * self._dir
         if self._offset > 24:
             self._dir = -1
         elif self._offset < -8:
