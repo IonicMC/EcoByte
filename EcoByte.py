@@ -1,13 +1,9 @@
 import os
-# Force X11 on Pi (avoids wayland plugin errors)
+# Force X11 on Pi
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["QT_QPA_PLATFORMTHEME"] = ""
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
-
-# prevent IM/virtual keyboard from shifting the window on focus
 os.environ["QT_IM_MODULE"] = "none"
-
-# Stable scaling
 os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"
 os.environ["QT_SCALE_FACTOR"] = "1"
 os.environ["QT_FONT_DPI"] = "96"
@@ -30,8 +26,7 @@ try:
     import cv2
     import numpy as np
 except Exception:
-    cv2 = None
-    np = None
+    cv2, np = None, None
 
 if cv2 is not None:
     try:
@@ -59,8 +54,7 @@ try:
     import board
     import neopixel
 except Exception:
-    board = None
-    neopixel = None
+    board, neopixel = None, None
 
 def prepare_audio_env():
     sudo_uid = os.environ.get("SUDO_UID")
@@ -91,38 +85,36 @@ GPIO_IR = 27  # BCM 27 is Physical Pin 13
 ULTRA_MIN_CM = 2.0
 ULTRA_MAX_CM = 18.0
 ULTRA_TIMEOUT_S = 0.03
-VERIFY_SECONDS = 1.0
+VERIFY_SECONDS = 1.5      # Give AI 1.5s to confirm if it's a bottle
+IR_DROP_TIMEOUT_S = 3.0   # Generous 3 seconds for the bottle to fall
+COOLDOWN_SECONDS = 2.0    # Prevent double-reads
 POLL_MS = 60
-CLEAR_BOTH_TIMEOUT_S = 2.0
 
 SERVO_CLOSED_US = 500
 SERVO_OPEN_US = 1200
-# GATE_OPEN_MS is removed, replaced by dynamic IR wait threshold below
 
 POINTS_PER_BOTTLE = 5
 
-# WS2812B LED strip
+# WS2812B LED strip (If colors glitch due to audio, change D18 to D10 and rewire!)
 LED_COUNT = 60          
 LED_BRIGHTNESS = 0.35   
 LED_IDLE_COLOR = (0, 255, 0)      
 LED_VERIFY_COLOR = (255, 0, 0)    
 
 # UI sizing
-BTN_W = 600
-BTN_H = 124
-SMALL_BTN_W = 320
-SMALL_BTN_H = 98
+BTN_W, BTN_H = 600, 124
+SMALL_BTN_W, SMALL_BTN_H = 320, 98
 
-# Background animation (60fps timers with relative speeds)
-WATER_FPS_MS = 16
-WAVE_SPEED = 0.04
+# Background animation (Capped at 30fps to stop overheating, speeds doubled)
+WATER_FPS_MS = 33
+WAVE_SPEED = 0.08
 WAVE_OPACITY = 0.18
 
 # Falling bottles
 BOTTLE_COUNT = 10
 BOTTLE_ALPHA = 44
-BOTTLE_SPEED_MIN = 1.75  
-BOTTLE_SPEED_MAX = 4.25
+BOTTLE_SPEED_MIN = 3.5  
+BOTTLE_SPEED_MAX = 8.5
 
 # Firebase
 FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -136,7 +128,6 @@ ONNX_INPUT_SIZE = 640
 ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
-ONNX_VERIFY_SECONDS = 1.0
 ONNX_MIN_POSITIVES = 2
 PREVIEW_INTERVAL_MS = 33  
 
@@ -144,19 +135,13 @@ PREVIEW_INTERVAL_MS = 33
 # ============================================================
 # Theme / Font
 # ============================================================
-
 FONT_FAMILY = "TT Hoves"
 
 def try_load_tt_hoves(base_dir: str):
     fonts_dir = os.path.join(base_dir, "fonts")
-    candidates = [
-        "TT-Hoves-Regular.ttf", "TT-Hoves-Bold.ttf", "TTHoves-Regular.ttf",
-        "TTHoves-Bold.ttf", "TT Hoves Regular.ttf", "TT Hoves Bold.ttf",
-    ]
-    for fn in candidates:
+    for fn in ["TT-Hoves-Regular.ttf", "TT-Hoves-Bold.ttf", "TTHoves-Regular.ttf", "TTHoves-Bold.ttf", "TT Hoves Regular.ttf", "TT Hoves Bold.ttf"]:
         path = os.path.join(fonts_dir, fn)
-        if os.path.exists(path):
-            QFontDatabase.addApplicationFont(path)
+        if os.path.exists(path): QFontDatabase.addApplicationFont(path)
 
 BG_TOP = QColor(35, 175, 215)
 BG_BOTTOM = QColor(35, 215, 190)
@@ -170,72 +155,52 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
     img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
     img = img.resize((size_px, size_px))
     w, h = img.size
-    data = img.tobytes("raw", "RGB")
-    qimg = QImage(data, w, h, 3 * w, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimg)
-
+    return QPixmap.fromImage(QImage(img.tobytes("raw", "RGB"), w, h, 3 * w, QImage.Format.Format_RGB888))
 
 # ============================================================
 # Sound Manager
 # ============================================================
-
 class SoundManager:
     def __init__(self, base_dir: str):
         self.ok = False
-        self.base_dir = base_dir
         self.sounds_dir = os.path.join(base_dir, "sounds")
         self.ch_ui = self.ch_fx = self.ch_success = None
 
         try:
             pygame.mixer.pre_init(44100, -16, 2, 2048)
-            if pygame.mixer.get_init() is not None:
-                pygame.mixer.quit()
-
-            last_err = None
+            if pygame.mixer.get_init() is not None: pygame.mixer.quit()
             for driver in [os.environ.get("SDL_AUDIODRIVER", "pulseaudio"), "alsa", None]:
                 try:
                     if driver: os.environ["SDL_AUDIODRIVER"] = driver
                     elif "SDL_AUDIODRIVER" in os.environ: del os.environ["SDL_AUDIODRIVER"]
                     pygame.mixer.init()
                     pygame.mixer.set_num_channels(16)
-                    self.ch_ui = pygame.mixer.Channel(1)
-                    self.ch_fx = pygame.mixer.Channel(2)
-                    self.ch_success = pygame.mixer.Channel(3)
+                    self.ch_ui, self.ch_fx, self.ch_success = pygame.mixer.Channel(1), pygame.mixer.Channel(2), pygame.mixer.Channel(3)
                     self.ok = True
                     break
-                except Exception as e:
-                    last_err = e
-                    try: pygame.mixer.quit()
-                    except Exception: pass
+                except Exception: pass
+        except Exception: return
 
-            if not self.ok:
-                raise last_err if last_err is not None else RuntimeError("Unknown pygame mixer init failure")
-        except Exception as e:
-            print("Sound init failed:", e)
-            return
-
-        def p(name): return os.path.join(self.sounds_dir, name)
-
+        p = lambda name: os.path.join(self.sounds_dir, name)
         self.path_idle = p("idle.wav")
-        self._snd_tap = self._load(p("tap.wav"), "tap.wav")
-        self._snd_bottle = self._load(p("bottle.wav"), "bottle.wav")
-        self._snd_success = self._load(p("success.wav"), "success.wav")
-        self._snd_qr_show = self._load(p("qr_show.wav"), "qr_show.wav")
-
+        self._snd_tap = self._load(p("tap.wav"))
+        self._snd_bottle = self._load(p("bottle.wav"))
+        self._snd_success = self._load(p("success.wav"))
+        self._snd_qr_show = self._load(p("qr_show.wav"))
         self._idle_playing = False
         self._lock = threading.Lock()
 
-    def _load(self, path, label):
-        if not self.ok or not os.path.exists(path): return None
-        try: return pygame.mixer.Sound(path)
-        except Exception: return None
+    def _load(self, path):
+        if self.ok and os.path.exists(path):
+            try: return pygame.mixer.Sound(path)
+            except Exception: return None
+        return None
 
     def play_idle(self, volume=0.55):
         if not self.ok: return
         with self._lock:
-            if self._idle_playing: return
+            if self._idle_playing or not os.path.exists(self.path_idle): return
             try:
-                if not os.path.exists(self.path_idle): return
                 pygame.mixer.music.load(self.path_idle)
                 pygame.mixer.music.set_volume(volume)
                 pygame.mixer.music.play(-1)
@@ -259,24 +224,18 @@ class SoundManager:
             self.ch_fx.play(self._snd_bottle)
 
     def qr_show(self):
-        if not self.ok: return
-        if self._snd_qr_show and self.ch_ui:
+        if self.ok and self._snd_qr_show and self.ch_ui:
             self._snd_qr_show.set_volume(1.0)
-            self.ch_ui.stop()
             self.ch_ui.play(self._snd_qr_show)
 
     def success(self):
-        if not self.ok: return
-        if self._snd_success and self.ch_success:
+        if self.ok and self._snd_success and self.ch_success:
             self._snd_success.set_volume(1.0)
-            self.ch_success.stop()
             self.ch_success.play(self._snd_success)
-
 
 # ============================================================
 # Firebase helper
 # ============================================================
-
 class FirebaseClient(QObject):
     log = pyqtSignal(str)
     ok = pyqtSignal(str)
@@ -293,40 +252,27 @@ class FirebaseClient(QObject):
                 r = requests.put(self._url(f"tokens/{token}"), json=payload, timeout=FIREBASE_TIMEOUT_S)
                 if r.ok: self.ok.emit("deposit_saved")
                 else: self.log.emit(f"Firebase PUT failed: {r.status_code}")
-            except Exception as e:
-                self.log.emit(f"Firebase error: {e}")
+            except Exception as e: self.log.emit(f"Firebase error: {e}")
         threading.Thread(target=worker, daemon=True).start()
 
     def consume_redeem_token_async(self, token: str):
         def worker():
             try:
                 r = requests.get(self._url(f"tokens/{token}"), timeout=FIREBASE_TIMEOUT_S)
-                if not r.ok:
-                    self.ok.emit("redeem_invalid")
-                    return
+                if not r.ok: return self.ok.emit("redeem_invalid")
                 data = r.json()
-                if not data or data.get("used") is True:
-                    self.ok.emit("redeem_invalid")
-                    return
-
-                patch = {"used": True, "used_ts": int(time.time())}
-                r2 = requests.patch(self._url(f"tokens/{token}"), json=patch, timeout=FIREBASE_TIMEOUT_S)
+                if not data or data.get("used") is True: return self.ok.emit("redeem_invalid")
+                r2 = requests.patch(self._url(f"tokens/{token}"), json={"used": True, "used_ts": int(time.time())}, timeout=FIREBASE_TIMEOUT_S)
                 if r2.ok: self.ok.emit("redeem_ok")
                 else: self.ok.emit("redeem_invalid")
-            except Exception as e:
-                self.log.emit(f"Firebase error: {e}")
-                self.ok.emit("redeem_invalid")
+            except Exception as e: self.ok.emit("redeem_invalid")
         threading.Thread(target=worker, daemon=True).start()
-
 
 # ============================================================
 # Animated Background: Waves + Falling Bottles
 # ============================================================
-
 class _BottleParticle:
-    def __init__(self):
-        self.reset(1080, 1920)
-
+    def __init__(self): self.reset(1080, 1920)
     def reset(self, width, height):
         self.x = random.uniform(0.08, 0.92) * width
         self.y = random.uniform(-1.0, 0.2) * height
@@ -338,24 +284,16 @@ class _BottleParticle:
 class WaterBackground(QWidget):
     def __init__(self, top: QColor, bottom: QColor, asset_bottle_png: str = "", parent=None):
         super().__init__(parent)
-        self._top = top
-        self._bottom = bottom
+        self._top, self._bottom = top, bottom
         self._phase = 0.0
-
         self._bottles = [_BottleParticle() for _ in range(BOTTLE_COUNT)]
-
-        self._bottle_pm = None
-        if asset_bottle_png and os.path.exists(asset_bottle_png):
-            pm = QPixmap(asset_bottle_png)
-            if not pm.isNull(): self._bottle_pm = pm
-
+        self._bottle_pm = QPixmap(asset_bottle_png) if asset_bottle_png and os.path.exists(asset_bottle_png) else None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._timer.isActive():
-            self._timer.start(WATER_FPS_MS) 
+        if not self._timer.isActive(): self._timer.start(WATER_FPS_MS) 
 
     def hideEvent(self, event):
         super().hideEvent(event)
@@ -363,15 +301,12 @@ class WaterBackground(QWidget):
 
     def _tick(self):
         self._phase += WAVE_SPEED
-        w = max(1, self.width())
-        h = max(1, self.height())
-
+        w, h = max(1, self.width()), max(1, self.height())
         for b in self._bottles:
             b.y += b.speed
             if b.y > h + 170:
                 b.reset(w, h)
                 b.y = -170
-
         if self._phase > 1e9: self._phase = 0.0
         self.update()
 
@@ -389,10 +324,7 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
 
-        hx = int(cx - body_w * 0.22)
-        hy = int(y0 + neck_h + body_h * 0.12)
-        hw = int(body_w * 0.14)
-        hh = int(body_h * 0.60)
+        hx, hy, hw, hh = int(cx - body_w * 0.22), int(y0 + neck_h + body_h * 0.12), int(body_w * 0.14), int(body_h * 0.60)
         rr = int(max(2, 7 * s))
         p.setBrush(QColor(255, 255, 255, int(alpha * 0.55)))
         p.drawRoundedRect(hx, hy, hw, hh, rr, rr)
@@ -408,9 +340,7 @@ class WaterBackground(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
-        w = self.width()
-        h = self.height()
+        w, h = self.width(), self.height()
 
         grad = QLinearGradient(0, 0, 0, h)
         grad.setColorAt(0.0, self._top)
@@ -423,15 +353,11 @@ class WaterBackground(QWidget):
         p.fillRect(0, 0, w, int(h * 0.24), fade)
 
         for b in self._bottles:
-            sway = math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp
-            cx = b.x + sway
-            cy = b.y
+            cx, cy = b.x + math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp, b.y
             s = 0.9 * b.scale
 
-            if self._bottle_pm:
-                target_h = int(120 * s)
-                target_w = int(60 * s)
-                pm = self._bottle_pm.scaled(target_w, target_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            if self._bottle_pm and not self._bottle_pm.isNull():
+                pm = self._bottle_pm.scaled(int(60 * s), int(120 * s), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 p.setOpacity(BOTTLE_ALPHA / 255.0)
                 p.drawPixmap(int(cx - pm.width()/2), int(cy - pm.height()/2), pm)
                 p.setOpacity(1.0)
@@ -443,9 +369,7 @@ class WaterBackground(QWidget):
             path.moveTo(0, h)
             path.lineTo(0, y_base)
             step = max(8, w // 80)
-            for x in range(0, w + step, step):
-                y = y_base + amp * math.sin((x * freq) + self._phase + shift)
-                path.lineTo(x, y)
+            for x in range(0, w + step, step): path.lineTo(x, y_base + amp * math.sin((x * freq) + self._phase + shift))
             path.lineTo(w, h)
             path.closeSubpath()
             return path
@@ -456,11 +380,9 @@ class WaterBackground(QWidget):
         p.setBrush(QColor(255, 255, 255, int(255 * (WAVE_OPACITY * 0.70))))
         p.drawPath(wave_path(int(h * 0.78), 18, 0.020, 1.4))
 
-
 # ============================================================
-# Secret Exit Corner (tap 5x)
+# Utility UI Classes (Secret Corner, Dialogs, etc)
 # ============================================================
-
 class SecretExitCorner(QPushButton):
     def __init__(self, on_exit, parent=None):
         super().__init__("", parent)
@@ -476,18 +398,9 @@ class SecretExitCorner(QPushButton):
     def _tap(self):
         if self._count == 0: self._timer.start(3000)
         self._count += 1
-        if self._count >= 5:
-            self._reset()
-            self.on_exit()
+        if self._count >= 5: self._reset(); self.on_exit()
 
-    def _reset(self):
-        self._count = 0
-        self._timer.stop()
-
-
-# ============================================================
-# Themed Confirm Dialog
-# ============================================================
+    def _reset(self): self._count = 0; self._timer.stop()
 
 class ThemedConfirmDialog(QDialog):
     def __init__(self, parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "No"):
@@ -532,23 +445,10 @@ class ThemedConfirmDialog(QDialog):
         btn_row.addWidget(yes_btn)
         btn_row.addStretch(1)
 
-        root.addStretch(1)
-        root.addWidget(title_lbl)
-        root.addWidget(msg_lbl)
-        root.addStretch(1)
-        root.addLayout(btn_row)
+        root.addStretch(1); root.addWidget(title_lbl); root.addWidget(msg_lbl)
+        root.addStretch(1); root.addLayout(btn_row)
 
-        self.setStyleSheet("""
-            QDialog {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(35,175,215,245), stop:1 rgba(35,215,190,245));
-                border: 2px solid rgba(255,255,255,0.24); border-radius: 30px;
-            }
-        """)
-
-
-# ============================================================
-# Idle countdown indicator
-# ============================================================
+        self.setStyleSheet("QDialog { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(35,175,215,245), stop:1 rgba(35,215,190,245)); border: 2px solid rgba(255,255,255,0.24); border-radius: 30px; }")
 
 class IdleRing(QWidget):
     def __init__(self, parent=None):
@@ -559,9 +459,7 @@ class IdleRing(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def set_countdown(self, remaining_ms: int, total_ms: int):
-        total_ms = max(1, int(total_ms))
-        remaining_ms = max(0, int(remaining_ms))
-        self._progress = clamp(remaining_ms / total_ms, 0.0, 1.0)
+        self._progress = clamp(max(0, int(remaining_ms)) / max(1, int(total_ms)), 0.0, 1.0)
         self._seconds = math.ceil(remaining_ms / 1000.0) if remaining_ms > 0 else 0
         self.update()
 
@@ -569,30 +467,19 @@ class IdleRing(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = self.rect().adjusted(6, 6, -6, -6)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 26))
-        p.drawEllipse(r)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 255, 255, 26)); p.drawEllipse(r)
 
         track = QPen(QColor(255, 255, 255, 75), 7)
         track.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(track)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawArc(r, 0, 360 * 16)
+        p.setPen(track); p.setBrush(Qt.BrushStyle.NoBrush); p.drawArc(r, 0, 360 * 16)
 
         arc = QPen(QColor(255, 255, 255, 210), 7)
         arc.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(arc)
-        span = int(-360 * 16 * self._progress)
-        p.drawArc(r, 90 * 16, span)
+        p.setPen(arc); p.drawArc(r, 90 * 16, int(-360 * 16 * self._progress))
 
         p.setPen(QColor(255, 255, 255, 230))
         p.setFont(QFont(FONT_FAMILY, 16, QFont.Weight.Bold))
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, str(self._seconds))
-
-
-# ============================================================
-# Animated number label
-# ============================================================
 
 class AnimatedNumberLabel(QLabel):
     def __init__(self, prefix: str, parent=None):
@@ -606,10 +493,7 @@ class AnimatedNumberLabel(QLabel):
 
     def _sync(self): self.setText(f"{self._prefix}{int(round(self._value))}")
     def getValue(self): return self._value
-    def setValue(self, v):
-        self._value = float(v)
-        self._sync()
-
+    def setValue(self, v): self._value = float(v); self._sync()
     value = pyqtProperty(float, fget=getValue, fset=setValue)
 
     def animate_to(self, target: int):
@@ -618,18 +502,9 @@ class AnimatedNumberLabel(QLabel):
         self._anim.setEndValue(float(target))
         self._anim.start()
 
-
-# ============================================================
-# Colored EcoByte title widget
-# ============================================================
-
 class ColoredEcoByteTitle(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(220)
-
+    def __init__(self, parent=None): super().__init__(parent); self.setFixedHeight(220)
     def sizeHint(self): return QSize(980, 220)
-
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -638,50 +513,32 @@ class ColoredEcoByteTitle(QWidget):
         fm = p.fontMetrics()
         parts = ["Eco", "B", "yte"]
         widths = [fm.horizontalAdvance(t) for t in parts]
-        total = sum(widths)
-        x = (self.width() - total) // 2
+        x = (self.width() - sum(widths)) // 2
         y = (self.height() + fm.ascent() - fm.descent()) // 2
 
         def draw_part(text, x_pos, color):
             path = QPainterPath()
             path.addText(float(x_pos), float(y), font, text)
-            shadow = QPainterPath(path)
-            shadow.translate(0, 7)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(0, 0, 0, 55))
-            p.drawPath(shadow)
-            p.setBrush(color)
-            p.drawPath(path)
+            shadow = QPainterPath(path); shadow.translate(0, 7)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(0, 0, 0, 55)); p.drawPath(shadow)
+            p.setBrush(color); p.drawPath(path)
 
-        draw_part("Eco", x, QColor(80, 240, 120))
-        x += widths[0]
-        draw_part("B", x, QColor(90, 190, 255))
-        x += widths[1]
+        draw_part("Eco", x, QColor(80, 240, 120)); x += widths[0]
+        draw_part("B", x, QColor(90, 190, 255)); x += widths[1]
         draw_part("yte", x, QColor(10, 155, 165))
 
-
-# ============================================================
-# Button styling
-# ============================================================
-
 def make_primary_button(text: str) -> QPushButton:
-    b = QPushButton(text)
-    b.setFixedSize(BTN_W, BTN_H)
-    b.setFont(QFont(FONT_FAMILY, 26, QFont.Weight.Bold))
+    b = QPushButton(text); b.setFixedSize(BTN_W, BTN_H); b.setFont(QFont(FONT_FAMILY, 26, QFont.Weight.Bold))
     b.setStyleSheet("QPushButton { background: rgba(255,255,255,0.18); color: white; border: 2px solid rgba(255,255,255,0.34); border-radius: 28px; letter-spacing: 1px; } QPushButton:pressed { background: rgba(255,255,255,0.26); }")
     return b
 
 def make_secondary_button(text: str) -> QPushButton:
-    b = QPushButton(text)
-    b.setFixedSize(BTN_W, BTN_H)
-    b.setFont(QFont(FONT_FAMILY, 24, QFont.Weight.Bold))
+    b = QPushButton(text); b.setFixedSize(BTN_W, BTN_H); b.setFont(QFont(FONT_FAMILY, 24, QFont.Weight.Bold))
     b.setStyleSheet("QPushButton { background: rgba(255,255,255,0.94); color: #0B7A3B; border-radius: 28px; letter-spacing: 0.5px; } QPushButton:pressed { background: rgba(255,255,255,0.78); }")
     return b
 
 def make_small_button(text: str) -> QPushButton:
-    b = QPushButton(text)
-    b.setFixedSize(SMALL_BTN_W, SMALL_BTN_H)
-    b.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
+    b = QPushButton(text); b.setFixedSize(SMALL_BTN_W, SMALL_BTN_H); b.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
     b.setStyleSheet("QPushButton { background: rgba(255,255,255,0.94); color: #0B7A3B; border-radius: 20px; } QPushButton:pressed { background: rgba(255,255,255,0.78); }")
     return b
 
@@ -694,7 +551,6 @@ def make_card() -> QWidget:
 # ============================================================
 # Dual-Threaded ONNX Bottle Verifier + OpenCV Tracker
 # ============================================================
-
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
         self.enabled = bool(USE_ONNX_VERIFIER)
@@ -702,20 +558,12 @@ class ONNXBottleVerifier:
         self.reason = "disabled"
         self.model_path = os.path.join(base_dir, ONNX_MODEL_PATH)
         
-        self._net = None
-        self._cap = None
+        self._net, self._cap = None, None
         self._lock = threading.RLock()
         
-        self._raw_frame = None
-        self._latest_bboxes = []
-        self._last_detection = False
-        self._last_conf = 0.0
-        self._frame_count = 0
-        
-        self._tracker = None
-        self._tracking_bbox = None
-        self._needs_tracker_sync = False
-        
+        self._raw_frame, self._latest_bboxes = None, []
+        self._last_detection, self._last_conf, self._frame_count = False, 0.0, 0
+        self._tracker, self._tracking_bbox, self._needs_tracker_sync = None, None, False
         self.running = False
 
         if not self.enabled: return
@@ -731,15 +579,11 @@ class ONNXBottleVerifier:
             self.available = True
             self.reason = "ready"
             self.running = True
-            
             self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
             self._capture_thread.start()
-            
             self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
             self._inference_thread.start()
-            
-        except Exception as e:
-            self.reason = str(e)
+        except Exception as e: self.reason = str(e)
 
     def _create_tracker(self):
         try: return cv2.TrackerKCF_create()
@@ -757,12 +601,10 @@ class ONNXBottleVerifier:
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception: pass
             start = time.monotonic()
-            while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
-                time.sleep(0.05)
+            while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S: time.sleep(0.05)
             return self._cap.isOpened()
         except Exception:
-            self._cap = None
-            return False
+            self._cap = None; return False
 
     def release(self):
         self.running = False
@@ -775,8 +617,7 @@ class ONNXBottleVerifier:
     def _capture_loop(self):
         while self.running:
             if not self._ensure_camera():
-                time.sleep(0.5)
-                continue
+                time.sleep(0.5); continue
             ok, frame = self._cap.read()
             if ok and frame is not None:
                 with self._lock: self._raw_frame = frame.copy()
@@ -789,8 +630,7 @@ class ONNXBottleVerifier:
                 if self._raw_frame is not None: frame_to_infer = self._raw_frame.copy()
             
             if frame_to_infer is None:
-                time.sleep(0.05)
-                continue
+                time.sleep(0.05); continue
 
             kept, detected, best_conf = self._run_model(frame_to_infer)
 
@@ -801,7 +641,7 @@ class ONNXBottleVerifier:
                 self._frame_count += 1
                 if detected and len(kept) > 0: self._needs_tracker_sync = True
                 
-            time.sleep(0.01)
+            time.sleep(0.02) # Slightly longer sleep to keep the Pi cool
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
@@ -837,8 +677,7 @@ class ONNXBottleVerifier:
                 i = i[0] if isinstance(i, (tuple, list, np.ndarray)) else i
                 kept.append((boxes[i], scores[i]))
 
-        detected = len(kept) > 0
-        return kept, detected, best_conf
+        return kept, len(kept) > 0, best_conf
 
     def get_preview_qimage(self):
         if not self.available: return None
@@ -883,7 +722,7 @@ class ONNXBottleVerifier:
         if not self.available: return True
         start = time.monotonic()
         positives, reads, last_frame, best, consecutive, best_consecutive = 0, 0, -1, 0.0, 0, 0
-        while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
+        while (time.monotonic() - start) < VERIFY_SECONDS:
             with self._lock:
                 current_frame, det, conf = self._frame_count, self._last_detection, self._last_conf
             if current_frame != last_frame:
@@ -891,9 +730,7 @@ class ONNXBottleVerifier:
                 last_frame = current_frame
                 best = max(best, conf)
                 if det:
-                    positives += 1
-                    consecutive += 1
-                    best_consecutive = max(best_consecutive, consecutive)
+                    positives += 1; consecutive += 1; best_consecutive = max(best_consecutive, consecutive)
                 else: consecutive = 0
             time.sleep(0.015)
 
@@ -901,11 +738,9 @@ class ONNXBottleVerifier:
         accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
         return accepted
 
-
 # ============================================================
-# Hardware Worker (Dynamic IR Threshold Logic)
+# Hardware Worker (Includes Reject Logic and Cooldowns)
 # ============================================================
-
 class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
     dropped = pyqtSignal()
@@ -922,33 +757,32 @@ class HardwareWorker(QThread):
         self._verify_start = None
         self._pi = None
         self._wake_latched = False
-        self._waiting_clear = False
-        self._clear_wait_start = None
+        
+        # State locks
+        self._in_cooldown = False
+        self._waiting_for_removal = False
+        
         self._last_activity_emit = 0.0 
 
     def stop(self): self.running = False
 
     def set_session(self, enabled: bool):
         self.session_enabled = enabled
-        self._verifying = self._latched = self._wake_latched = self._waiting_clear = False
-        self._clear_wait_start = None
+        self._verifying = self._latched = self._wake_latched = False
+        self._in_cooldown = self._waiting_for_removal = False
         if enabled: self.ui_mode.emit("WAITING")
 
     def _distance_cm(self):
         try:
-            GPIO.output(GPIO_TRIG, False)
-            time.sleep(0.000002)
-            GPIO.output(GPIO_TRIG, True)
-            time.sleep(0.00001)
-            GPIO.output(GPIO_TRIG, False)
+            GPIO.output(GPIO_TRIG, False); time.sleep(0.000002)
+            GPIO.output(GPIO_TRIG, True); time.sleep(0.00001); GPIO.output(GPIO_TRIG, False)
             start_wait = time.monotonic()
             while GPIO.input(GPIO_ECHO) == 0:
                 if time.monotonic() - start_wait > ULTRA_TIMEOUT_S: return None
             pulse_start = time.monotonic()
             while GPIO.input(GPIO_ECHO) == 1:
                 if time.monotonic() - pulse_start > ULTRA_TIMEOUT_S: return None
-            pulse_end = time.monotonic()
-            distance_cm = (pulse_end - pulse_start) * 17150.0
+            distance_cm = (time.monotonic() - pulse_start) * 17150.0
             if 0.5 <= distance_cm <= 400: return distance_cm
             return None
         except Exception: return None
@@ -962,13 +796,8 @@ class HardwareWorker(QThread):
         return ULTRA_MIN_CM <= d2 <= ULTRA_MAX_CM
 
     def run(self):
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(GPIO_TRIG, GPIO.OUT)
-        GPIO.setup(GPIO_ECHO, GPIO.IN)
-        GPIO.output(GPIO_TRIG, False)
-        
-        # Setup IR Anti-Cheat Sensor
+        GPIO.setwarnings(False); GPIO.setmode(GPIO.BCM)
+        GPIO.setup(GPIO_TRIG, GPIO.OUT); GPIO.setup(GPIO_ECHO, GPIO.IN); GPIO.output(GPIO_TRIG, False)
         GPIO.setup(GPIO_IR, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
         self._pi = pigpio.pi()
@@ -983,24 +812,43 @@ class HardwareWorker(QThread):
 
         try:
             while self.running:
+                # 1. State: Object must be removed before proceeding
+                if self._waiting_for_removal:
+                    if not self._object_present():
+                        self._waiting_for_removal = False
+                        self._latched = False
+                        self.ui_mode.emit("WAITING")
+                    self.msleep(100)
+                    continue
+                
+                # 2. State: Cooldown block to prevent double-reads
+                if self._in_cooldown:
+                    time.sleep(COOLDOWN_SECONDS)
+                    self._in_cooldown = False
+                    self._latched = False
+                    self.ui_mode.emit("WAITING")
+                    continue
+
+                # Read Sensors
                 ultrasonic_ready = self._object_present()
                 camera_ready = False
-
                 if self.verifier is not None and getattr(self.verifier, 'available', False):
                     try: camera_ready = self.verifier.quick_detect()
-                    except Exception: camera_ready = False
+                    except Exception: pass
 
                 ready = camera_ready or ultrasonic_ready
 
+                # Keep UI Awake
                 if ready:
                     now = time.monotonic()
                     if now - self._last_activity_emit > 0.5:
                         self.sensor_activity.emit()
                         self._last_activity_emit = now
 
+                # 3. Main Logic
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
-                    if ready and (not self._wake_latched):
+                    if ready and not self._wake_latched:
                         self._wake_latched = True
                         self.wake_requested.emit()
                     elif not ready:
@@ -1008,19 +856,7 @@ class HardwareWorker(QThread):
                     self.msleep(POLL_MS)
                     continue
 
-                if self._waiting_clear:
-                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
-                    if (not ready) or (self._clear_wait_start is not None and (time.monotonic() - self._clear_wait_start) >= CLEAR_BOTH_TIMEOUT_S):
-                        self._waiting_clear = False
-                        self._latched = False
-                        self._clear_wait_start = None
-                        self.ui_mode.emit("WAITING")
-                    else:
-                        self.ui_mode.emit("DROPPING")
-                    self.msleep(POLL_MS)
-                    continue
-
-                if ready and (not self._verifying) and (not self._latched):
+                if ready and not self._verifying and not self._latched:
                     self._verifying = True
                     self._latched = True
                     self._verify_start = time.monotonic()
@@ -1028,6 +864,7 @@ class HardwareWorker(QThread):
 
                 if self._verifying:
                     self.ui_mode.emit("VERIFYING")
+                    
                     if (time.monotonic() - self._verify_start) >= VERIFY_SECONDS:
                         allow_drop = True
                         if self.verifier is not None and getattr(self.verifier, 'available', False):
@@ -1037,42 +874,36 @@ class HardwareWorker(QThread):
                         self._verifying = False
 
                         if not allow_drop:
-                            self._latched = False
-                            self.ui_mode.emit("WAITING")
+                            # === REJECT LOGIC ===
+                            self.ui_mode.emit("REJECTED")
+                            self._waiting_for_removal = True
                         else:
+                            # === ACCEPT & DROP LOGIC ===
                             self.ui_mode.emit("DROPPING")
-                            
-                            # === DYNAMIC DROP AND VERIFY SEQUENCE ===
                             servo_pulse(SERVO_OPEN_US)
                             
                             drop_start = time.monotonic()
                             bottle_fell = False
                             
-                            # Wait UP TO 1.5 seconds for the bottle to drop and trigger IR
-                            max_wait_time = 1.5  
-                            
-                            while (time.monotonic() - drop_start) < max_wait_time:
+                            # Wait UP TO 3.0 seconds for the bottle to drop and trigger IR
+                            while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
                                 if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
-                                    # Give it a tiny fraction of a second to fully clear the chute
-                                    time.sleep(0.3) 
-                                    break # Exit the wait early!
+                                    time.sleep(0.3) # Give it a fraction to fully clear
+                                    break 
                                 time.sleep(0.01)
                                 
-                            # Close the gate regardless of what happened
                             servo_pulse(SERVO_CLOSED_US, hold=True)
                             
-                            # Reward points only if it successfully fell
                             if bottle_fell:
-                                self._waiting_clear = True
-                                self._clear_wait_start = time.monotonic()
                                 self.dropped.emit()
+                                self._in_cooldown = True  # Stop double scanning next bottle
                             else:
-                                print("[ANTI-CHEAT] Bottle pulled back or timed out! No points awarded.")
-                                self._latched = False
-                                self.ui_mode.emit("WAITING")
+                                # They pulled it back!
+                                print("[ANTI-CHEAT] Bottle pulled back! No points awarded.")
+                                self.ui_mode.emit("REJECTED")
+                                self._waiting_for_removal = True
                 else:
-                    self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     self.ui_mode.emit("WAITING")
 
                 self.msleep(POLL_MS)
@@ -1092,27 +923,23 @@ class HardwareWorker(QThread):
 # ============================================================
 # Redeem Arrow (glow) 
 # ============================================================
-
 class BouncingArrow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._offset = 0.0
-        self._dir = 1
+        self._offset, self._dir = 0.0, 1
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self.setFixedHeight(260)
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._timer.isActive():
-            self._timer.start(16) 
+        if not self._timer.isActive(): self._timer.start(33) 
 
     def hideEvent(self, event):
-        super().hideEvent(event)
-        self._timer.stop()
+        super().hideEvent(event); self._timer.stop()
 
     def _tick(self):
-        self._offset += 0.9 * self._dir 
+        self._offset += 1.8 * self._dir 
         if self._offset > 24: self._dir = -1
         elif self._offset < -8: self._dir = 1
         self.update()
@@ -1127,260 +954,118 @@ class BouncingArrow(QWidget):
         path = QPainterPath()
         x0, y0 = cx - arrow_w / 2, cy - arrow_h / 2
         path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25), float(arrow_w*0.62), float(arrow_h*0.50), 24, 24)
-
         hx = x0 + arrow_w*0.62
         head = QPainterPath()
-        head.moveTo(float(hx), float(y0))
-        head.lineTo(float(x0 + arrow_w), float(cy))
-        head.lineTo(float(hx), float(y0 + arrow_h))
-        head.closeSubpath()
+        head.moveTo(float(hx), float(y0)); head.lineTo(float(x0 + arrow_w), float(cy)); head.lineTo(float(hx), float(y0 + arrow_h)); head.closeSubpath()
         path = path.united(head)
 
-        p.setPen(QPen(QColor(255, 255, 255, 70), 20))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 190))
-        p.drawPath(path)
-
-        p.setPen(QPen(QColor(255, 255, 255, 140), 6))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-
+        p.setPen(QPen(QColor(255, 255, 255, 70), 20)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 255, 255, 190)); p.drawPath(path)
+        p.setPen(QPen(QColor(255, 255, 255, 140), 6)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
 
 # ============================================================
 # QR Widget (scale+fade)
 # ============================================================
-
 class QRScaleWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._pm = None
-        self._scale = 0.86
-
-        self._opacity = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self._opacity)
-        self._opacity.setOpacity(0.0)
-
-        self._fade = QPropertyAnimation(self._opacity, b"opacity", self)
-        self._fade.setDuration(420)
-        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        self._scale_anim = QPropertyAnimation(self, b"scale", self)
-        self._scale_anim.setDuration(520)
-        self._scale_anim.setEasingCurve(QEasingCurve.Type.OutBack)
-
+        self._pm, self._scale = None, 0.86
+        self._opacity = QGraphicsOpacityEffect(self); self.setGraphicsEffect(self._opacity); self._opacity.setOpacity(0.0)
+        self._fade = QPropertyAnimation(self._opacity, b"opacity", self); self._fade.setDuration(420); self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scale_anim = QPropertyAnimation(self, b"scale", self); self._scale_anim.setDuration(520); self._scale_anim.setEasingCurve(QEasingCurve.Type.OutBack)
         self.setFixedSize(720, 720)
 
-    def setPixmap(self, pm: QPixmap):
-        self._pm = pm
-        self.play()
+    def setPixmap(self, pm: QPixmap): self._pm = pm; self.play()
 
     def play(self):
-        self._fade.stop()
-        self._scale_anim.stop()
-        self._opacity.setOpacity(0.0)
-        self._fade.setStartValue(0.0)
-        self._fade.setEndValue(1.0)
-        self._fade.start()
-        self._scale = 0.86
-        self._scale_anim.setStartValue(0.86)
-        self._scale_anim.setEndValue(1.0)
-        self._scale_anim.start()
+        self._fade.stop(); self._scale_anim.stop()
+        self._opacity.setOpacity(0.0); self._fade.setStartValue(0.0); self._fade.setEndValue(1.0); self._fade.start()
+        self._scale = 0.86; self._scale_anim.setStartValue(0.86); self._scale_anim.setEndValue(1.0); self._scale_anim.start()
         self.update()
 
     def getScale(self): return self._scale
-    def setScale(self, v):
-        self._scale = float(v)
-        self.update()
-
+    def setScale(self, v): self._scale = float(v); self.update()
     scale = pyqtProperty(float, fget=getScale, fset=setScale)
 
     def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.rect()
-        p.setPen(QPen(QColor(255, 255, 255, 70), 2))
-        p.setBrush(QColor(255, 255, 255, 36))
-        p.drawRoundedRect(rect.adjusted(6, 6, -6, -6), 34, 34)
-
+        p.setPen(QPen(QColor(255, 255, 255, 70), 2)); p.setBrush(QColor(255, 255, 255, 36)); p.drawRoundedRect(rect.adjusted(6, 6, -6, -6), 34, 34)
         if not self._pm: return
-
         base = min(rect.width(), rect.height()) - 100
         size = int(base * self._scale)
-        x = (rect.width() - size) // 2
-        y = (rect.height() - size) // 2
-
         pm = self._pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        p.drawPixmap(x, y, pm)
+        p.drawPixmap((rect.width() - size) // 2, (rect.height() - size) // 2, pm)
 
 
 # ============================================================
 # Screens
 # ============================================================
-
 class MainScreen(WaterBackground):
     def __init__(self, kiosk, bottle_png_path: str):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 95, 70, 70)
-        root.setSpacing(14)
-
+        root = QVBoxLayout(self); root.setContentsMargins(70, 95, 70, 70); root.setSpacing(14)
         title = ColoredEcoByteTitle()
         subtitle = QLabel("From Plastic, to Fantastic!")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setFont(QFont(FONT_FAMILY, 28))
-        subtitle.setStyleSheet("color: rgba(255,255,255,0.88);")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter); subtitle.setFont(QFont(FONT_FAMILY, 28)); subtitle.setStyleSheet("color: rgba(255,255,255,0.88);")
 
-        card = make_card()
-        card.setFixedHeight(410)
-        card.setFixedWidth(860)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(56, 44, 56, 44)
-        cl.setSpacing(18)
+        card = make_card(); card.setFixedHeight(410); card.setFixedWidth(860)
+        cl = QVBoxLayout(card); cl.setContentsMargins(56, 44, 56, 44); cl.setSpacing(18)
+        start_btn, redeem_btn = make_primary_button("START"), make_secondary_button("REDEEM LOAD")
+        start_btn.clicked.connect(self.kiosk.start_session); redeem_btn.clicked.connect(self.kiosk.go_redeem)
+        start_btn.clicked.connect(self.kiosk.snd.tap); redeem_btn.clicked.connect(self.kiosk.snd.tap)
 
-        start_btn = make_primary_button("START")
-        redeem_btn = make_secondary_button("REDEEM LOAD")
-
-        start_btn.clicked.connect(self.kiosk.start_session)
-        redeem_btn.clicked.connect(self.kiosk.go_redeem)
-        start_btn.clicked.connect(self.kiosk.snd.tap)
-        redeem_btn.clicked.connect(self.kiosk.snd.tap)
-
-        cl.addStretch(1)
-        cl.addWidget(start_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addWidget(redeem_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addStretch(1)
-
-        root.addStretch(2)
-        root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(subtitle)
-        root.addSpacing(10)
-        root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(3)
-
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
-
+        cl.addStretch(1); cl.addWidget(start_btn, alignment=Qt.AlignmentFlag.AlignCenter); cl.addWidget(redeem_btn, alignment=Qt.AlignmentFlag.AlignCenter); cl.addStretch(1)
+        root.addStretch(2); root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter); root.addWidget(subtitle); root.addSpacing(10); root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter); root.addStretch(3)
+        self._corner = SecretExitCorner(self.kiosk.exit_app, self); self._corner.move(0, 0)
 
 class DepositScreen(WaterBackground):
     def __init__(self, kiosk, bottle_png_path: str, verifier=None):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
-        self.kiosk = kiosk
-        self.verifier = verifier
+        self.kiosk, self.verifier = kiosk, verifier
+        root = QVBoxLayout(self); root.setContentsMargins(70, 60, 70, 44); root.setSpacing(10)
+        header = QLabel("Insert Bottle"); header.setAlignment(Qt.AlignmentFlag.AlignCenter); header.setFont(QFont(FONT_FAMILY, 62, QFont.Weight.Bold)); header.setStyleSheet("color: rgba(255,255,255,0.98);")
+        self.status = QLabel("Waiting for bottle..."); self.status.setAlignment(Qt.AlignmentFlag.AlignCenter); self.status.setFont(QFont(FONT_FAMILY, 28)); self.status.setStyleSheet("color: rgba(255,255,255,0.92);")
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 60, 70, 44)
-        root.setSpacing(10)
+        card = make_card(); card.setFixedHeight(700); card.setFixedWidth(980)
+        cl = QVBoxLayout(card); cl.setContentsMargins(36, 28, 36, 30); cl.setSpacing(16)
+        self.camera_label = QLabel(); self.camera_label.setFixedSize(860, 470); self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_label.setStyleSheet("background: rgba(0,0,0,0.18); border: 2px solid rgba(255,255,255,0.18); border-radius: 28px; color: rgba(255,255,255,0.72); font-size: 26px;"); self.camera_label.setText("Camera preview will appear here")
 
-        header = QLabel("Insert Bottle")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setFont(QFont(FONT_FAMILY, 62, QFont.Weight.Bold))
-        header.setStyleSheet("color: rgba(255,255,255,0.98);")
+        counts_row = QHBoxLayout(); counts_row.setSpacing(24)
+        c1 = QWidget(); c1.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;"); c1.setFixedHeight(110)
+        l1 = QVBoxLayout(c1); l1.setContentsMargins(12, 10, 12, 10); l1.setSpacing(4)
+        lb1 = QLabel("Accepted Bottles"); lb1.setAlignment(Qt.AlignmentFlag.AlignCenter); lb1.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold)); lb1.setStyleSheet("color: rgba(255,255,255,0.80);")
+        self.bottles_lbl = AnimatedNumberLabel(""); self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self.bottles_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold)); self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);"); self.bottles_lbl.setText("0")
+        l1.addWidget(lb1); l1.addWidget(self.bottles_lbl)
 
-        self.status = QLabel("Waiting for bottle...")
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setFont(QFont(FONT_FAMILY, 28))
-        self.status.setStyleSheet("color: rgba(255,255,255,0.92);")
+        c2 = QWidget(); c2.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;"); c2.setFixedHeight(110)
+        l2 = QVBoxLayout(c2); l2.setContentsMargins(12, 10, 12, 10); l2.setSpacing(4)
+        lb2 = QLabel("EcoPoints"); lb2.setAlignment(Qt.AlignmentFlag.AlignCenter); lb2.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold)); lb2.setStyleSheet("color: rgba(255,255,255,0.80);")
+        self.points_lbl = AnimatedNumberLabel(""); self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self.points_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold)); self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);"); self.points_lbl.setText("0")
+        l2.addWidget(lb2); l2.addWidget(self.points_lbl)
 
-        card = make_card()
-        card.setFixedHeight(700)
-        card.setFixedWidth(980)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(36, 28, 36, 30)
-        cl.setSpacing(16)
+        counts_row.addWidget(c1); counts_row.addWidget(c2)
+        cl.addStretch(1); cl.addWidget(self.camera_label, alignment=Qt.AlignmentFlag.AlignCenter); cl.addLayout(counts_row); cl.addStretch(1)
 
-        self.camera_label = QLabel()
-        self.camera_label.setFixedSize(860, 470)
-        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.camera_label.setStyleSheet("background: rgba(0,0,0,0.18); border: 2px solid rgba(255,255,255,0.18); border-radius: 28px; color: rgba(255,255,255,0.72); font-size: 26px;")
-        self.camera_label.setText("Camera preview will appear here")
+        btn_row = QHBoxLayout(); btn_row.setSpacing(18)
+        back_btn, finish_btn = make_small_button("BACK"), make_small_button("FINISH")
+        back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit); finish_btn.clicked.connect(self.kiosk.finish_session)
+        back_btn.clicked.connect(self.kiosk.snd.tap); finish_btn.clicked.connect(self.kiosk.snd.tap)
 
-        counts_row = QHBoxLayout()
-        counts_row.setSpacing(24)
+        btn_row.addStretch(1); btn_row.addWidget(back_btn); btn_row.addWidget(finish_btn); btn_row.addStretch(1)
+        root.addWidget(header); root.addWidget(self.status); root.addStretch(1); root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter); root.addStretch(1); root.addLayout(btn_row)
 
-        counts_card_1 = QWidget()
-        counts_card_1.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;")
-        counts_card_1.setFixedHeight(110)
-        counts_l1 = QVBoxLayout(counts_card_1)
-        counts_l1.setContentsMargins(12, 10, 12, 10)
-        counts_l1.setSpacing(4)
-        lbl1 = QLabel("Accepted Bottles")
-        lbl1.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl1.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
-        lbl1.setStyleSheet("color: rgba(255,255,255,0.80);")
-        self.bottles_lbl = AnimatedNumberLabel("")
-        self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
-        self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
-        self.bottles_lbl.setText("0")
-        counts_l1.addWidget(lbl1)
-        counts_l1.addWidget(self.bottles_lbl)
-
-        counts_card_2 = QWidget()
-        counts_card_2.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;")
-        counts_card_2.setFixedHeight(110)
-        counts_l2 = QVBoxLayout(counts_card_2)
-        counts_l2.setContentsMargins(12, 10, 12, 10)
-        counts_l2.setSpacing(4)
-        lbl2 = QLabel("EcoPoints")
-        lbl2.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl2.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
-        lbl2.setStyleSheet("color: rgba(255,255,255,0.80);")
-        self.points_lbl = AnimatedNumberLabel("")
-        self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.points_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
-        self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);")
-        self.points_lbl.setText("0")
-        counts_l2.addWidget(lbl2)
-        counts_l2.addWidget(self.points_lbl)
-
-        counts_row.addWidget(counts_card_1)
-        counts_row.addWidget(counts_card_2)
-
-        cl.addStretch(1)
-        cl.addWidget(self.camera_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        cl.addLayout(counts_row)
-        cl.addStretch(1)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(18)
-        back_btn = make_small_button("BACK")
-        finish_btn = make_small_button("FINISH")
-
-        back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit)
-        finish_btn.clicked.connect(self.kiosk.finish_session)
-        back_btn.clicked.connect(self.kiosk.snd.tap)
-        finish_btn.clicked.connect(self.kiosk.snd.tap)
-
-        btn_row.addStretch(1)
-        btn_row.addWidget(back_btn)
-        btn_row.addWidget(finish_btn)
-        btn_row.addStretch(1)
-
-        root.addWidget(header)
-        root.addWidget(self.status)
-        root.addStretch(1)
-        root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(1)
-        root.addLayout(btn_row)
-
-        self._preview_timer = QTimer(self)
-        self._preview_timer.timeout.connect(self._update_preview)
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
+        self._preview_timer = QTimer(self); self._preview_timer.timeout.connect(self._update_preview)
+        self._corner = SecretExitCorner(self.kiosk.exit_app, self); self._corner.move(0, 0)
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not self._preview_timer.isActive():
-            self._preview_timer.start(PREVIEW_INTERVAL_MS)
+        if not self._preview_timer.isActive(): self._preview_timer.start(PREVIEW_INTERVAL_MS)
 
     def hideEvent(self, event):
-        super().hideEvent(event)
-        self._preview_timer.stop()
+        super().hideEvent(event); self._preview_timer.stop()
 
     def _update_preview(self):
         if not self.isVisible(): return
@@ -1391,164 +1076,78 @@ class DepositScreen(WaterBackground):
         self.camera_label.setPixmap(pm)
 
     def set_mode(self, mode: str):
-        if mode == "WAITING": self.status.setText("Waiting for bottle...")
-        elif mode == "VERIFYING": self.status.setText("Confirming bottle... Hold it steady for 1 second")
-        elif mode == "DROPPING": self.status.setText("Bottle accepted. Processing...")
+        if mode == "WAITING":
+            self.status.setText("Waiting for bottle...")
+            self.status.setStyleSheet("color: rgba(255,255,255,0.92);")
+        elif mode == "VERIFYING":
+            self.status.setText("Confirming bottle... Hold it steady!")
+            self.status.setStyleSheet("color: rgba(255,255,255,0.92);")
+        elif mode == "DROPPING":
+            self.status.setText("Bottle accepted. Processing...")
+            self.status.setStyleSheet("color: rgba(180,255,180,1);")
+        elif mode == "REJECTED":
+            self.status.setText("Invalid Item. Please remove.")
+            self.status.setStyleSheet("color: rgba(255,100,100,1);")
 
     def animate_counts(self, bottles: int):
         self.bottles_lbl.animate_to(bottles)
         self.points_lbl.animate_to(bottles * POINTS_PER_BOTTLE)
 
-
 class QRScreen(WaterBackground):
     def __init__(self, kiosk, bottle_png_path: str):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 70, 70, 60)
-        root.setSpacing(12)
-
-        title = QLabel("Scan to Collect EcoPoints")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
-        title.setStyleSheet("color: rgba(255,255,255,0.98);")
-        title.setContentsMargins(40, 0, 40, 0)
-
-        self.subtitle = QLabel("")
-        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.subtitle.setWordWrap(True)
-        self.subtitle.setFont(QFont(FONT_FAMILY, 30))
-        self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);")
-        self.subtitle.setContentsMargins(40, 0, 40, 0)
-
+        root = QVBoxLayout(self); root.setContentsMargins(70, 70, 70, 60); root.setSpacing(12)
+        title = QLabel("Scan to Collect EcoPoints"); title.setAlignment(Qt.AlignmentFlag.AlignCenter); title.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold)); title.setStyleSheet("color: rgba(255,255,255,0.98);"); title.setContentsMargins(40, 0, 40, 0)
+        self.subtitle = QLabel(""); self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter); self.subtitle.setWordWrap(True); self.subtitle.setFont(QFont(FONT_FAMILY, 30)); self.subtitle.setStyleSheet("color: rgba(255,255,255,0.92);"); self.subtitle.setContentsMargins(40, 0, 40, 0)
         self.qr_widget = QRScaleWidget()
-        done_btn = make_small_button("DONE")
-        done_btn.clicked.connect(self.kiosk.go_main)
-        done_btn.clicked.connect(self.kiosk.snd.tap)
-
-        root.addStretch(1)
-        root.addWidget(title)
-        root.addWidget(self.subtitle)
-        root.addWidget(self.qr_widget, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(1)
-        root.addWidget(done_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
+        done_btn = make_small_button("DONE"); done_btn.clicked.connect(self.kiosk.go_main); done_btn.clicked.connect(self.kiosk.snd.tap)
+        root.addStretch(1); root.addWidget(title); root.addWidget(self.subtitle); root.addWidget(self.qr_widget, alignment=Qt.AlignmentFlag.AlignCenter); root.addStretch(1); root.addWidget(done_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._corner = SecretExitCorner(self.kiosk.exit_app, self); self._corner.move(0, 0)
 
     def set_qr(self, payload_text: str, bottles: int):
-        pts = bottles * POINTS_PER_BOTTLE
-        self.subtitle.setText(f"Bottles: {bottles}  -  EcoPoints: {pts}")
+        self.subtitle.setText(f"Bottles: {bottles}  -  EcoPoints: {bottles * POINTS_PER_BOTTLE}")
         self.qr_widget.setPixmap(qr_pixmap_from_text(payload_text, size_px=560))
-
 
 class RedeemScreen(WaterBackground):
     scanned_text = pyqtSignal(str)
-
     def __init__(self, kiosk, bottle_png_path: str):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(70, 85, 70, 60)
-        root.setSpacing(12)
-
-        title = QLabel("Redeem Load")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
-        title.setStyleSheet("color: rgba(255,255,255,0.98);")
-
-        card = make_card()
-        card.setFixedHeight(620)
-        card.setFixedWidth(860)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(56, 52, 56, 52)
-        cl.setSpacing(12)
-
-        instr = QLabel("Show your Redeem QR Code\non the EcoByte MIT App\nthen scan it on the RIGHT.")
-        instr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        instr.setWordWrap(True)
-        instr.setFont(QFont(FONT_FAMILY, 34))
-        instr.setStyleSheet("color: rgba(255,255,255,0.92);")
-        instr.setContentsMargins(18, 0, 18, 0)
-
-        self.status = QLabel("Scanner ready...")
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setFont(QFont(FONT_FAMILY, 26))
-        self.status.setStyleSheet("color: rgba(255,255,255,0.82);")
-
+        root = QVBoxLayout(self); root.setContentsMargins(70, 85, 70, 60); root.setSpacing(12)
+        title = QLabel("Redeem Load"); title.setAlignment(Qt.AlignmentFlag.AlignCenter); title.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold)); title.setStyleSheet("color: rgba(255,255,255,0.98);")
+        card = make_card(); card.setFixedHeight(620); card.setFixedWidth(860)
+        cl = QVBoxLayout(card); cl.setContentsMargins(56, 52, 56, 52); cl.setSpacing(12)
+        instr = QLabel("Show your Redeem QR Code\non the EcoByte MIT App\nthen scan it on the RIGHT."); instr.setAlignment(Qt.AlignmentFlag.AlignCenter); instr.setWordWrap(True); instr.setFont(QFont(FONT_FAMILY, 34)); instr.setStyleSheet("color: rgba(255,255,255,0.92);"); instr.setContentsMargins(18, 0, 18, 0)
+        self.status = QLabel("Scanner ready..."); self.status.setAlignment(Qt.AlignmentFlag.AlignCenter); self.status.setFont(QFont(FONT_FAMILY, 26)); self.status.setStyleSheet("color: rgba(255,255,255,0.82);")
         arrow = BouncingArrow()
+        self._input = QLineEdit(); self._input.setFixedSize(2, 2); self._input.setStyleSheet("background: transparent; border: none; color: transparent;"); self._input.returnPressed.connect(self._on_return); self._input.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False); self._input.setInputMethodHints(Qt.InputMethodHint.ImhNoAutoUppercase | Qt.InputMethodHint.ImhNoPredictiveText | Qt.InputMethodHint.ImhHiddenText)
+        cl.addStretch(1); cl.addWidget(instr); cl.addSpacing(6); cl.addWidget(arrow); cl.addWidget(self.status); cl.addWidget(self._input, alignment=Qt.AlignmentFlag.AlignLeft); cl.addStretch(1)
+        back_btn = make_small_button("BACK"); back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit); back_btn.clicked.connect(self.kiosk.snd.tap)
+        root.addStretch(1); root.addWidget(title); root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter); root.addStretch(1); root.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._corner = SecretExitCorner(self.kiosk.exit_app, self); self._corner.move(0, 0)
 
-        self._input = QLineEdit()
-        self._input.setFixedSize(2, 2)
-        self._input.setStyleSheet("background: transparent; border: none; color: transparent;")
-        self._input.returnPressed.connect(self._on_return)
-        self._input.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
-        self._input.setInputMethodHints(Qt.InputMethodHint.ImhNoAutoUppercase | Qt.InputMethodHint.ImhNoPredictiveText | Qt.InputMethodHint.ImhHiddenText)
-
-        cl.addStretch(1)
-        cl.addWidget(instr)
-        cl.addSpacing(6)
-        cl.addWidget(arrow)
-        cl.addWidget(self.status)
-        cl.addWidget(self._input, alignment=Qt.AlignmentFlag.AlignLeft)
-        cl.addStretch(1)
-
-        back_btn = make_small_button("BACK")
-        back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit)
-        back_btn.clicked.connect(self.kiosk.snd.tap)
-
-        root.addStretch(1)
-        root.addWidget(title)
-        root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter)
-        root.addStretch(1)
-        root.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        self._corner = SecretExitCorner(self.kiosk.exit_app, self)
-        self._corner.move(0, 0)
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        QTimer.singleShot(80, self._focus_input)
-
-    def _focus_input(self):
-        self._input.clear()
-        self._input.setFocus(Qt.FocusReason.OtherFocusReason)
-
-    def _on_return(self):
-        s = self._input.text().strip()
-        self._input.clear()
-        if s: self.scanned_text.emit(s)
-        self._focus_input()
-
-    def set_scanned_ok(self):
-        self.status.setText("SCANNED OK")
-        self.status.setStyleSheet("color: rgba(232,255,242,1);")
-
-    def set_scanned_bad(self):
-        self.status.setText("INVALID / USED X")
-        self.status.setStyleSheet("color: rgba(255,220,220,1);")
+    def showEvent(self, event): super().showEvent(event); QTimer.singleShot(80, self._focus_input)
+    def _focus_input(self): self._input.clear(); self._input.setFocus(Qt.FocusReason.OtherFocusReason)
+    def _on_return(self): s = self._input.text().strip(); self._input.clear(); (self.scanned_text.emit(s) if s else None); self._focus_input()
+    def set_scanned_ok(self): self.status.setText("SCANNED OK"); self.status.setStyleSheet("color: rgba(232,255,242,1);")
+    def set_scanned_bad(self): self.status.setText("INVALID / USED X"); self.status.setStyleSheet("color: rgba(255,220,220,1);")
 
 
 # ============================================================
 # Idle activity watcher
 # ============================================================
-
 class IdleEventFilter(QObject):
     activity = pyqtSignal()
-
     def eventFilter(self, obj, event):
         et = event.type()
         if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove, QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate, QEvent.Type.TouchEnd, QEvent.Type.KeyPress):
             self.activity.emit()
         return False
 
-
 # ============================================================
 # LED Controller (WS2812B)
 # ============================================================
-
 class LEDController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1561,23 +1160,26 @@ class LEDController(QObject):
 
     def _set_color(self, rgb):
         if self._pixels:
-            try: self._pixels.fill(rgb)
+            try:
+                self._pixels.fill((0,0,0)) # Clear first to prevent PWM audio corruption
+                self._pixels.fill(rgb)
             except Exception: pass
 
     def set_idle(self): self._set_color(LED_IDLE_COLOR)
     def set_busy(self): self._set_color(LED_VERIFY_COLOR)
+    def set_error(self): self._set_color((255, 0, 0)) # Red for rejected
     def set_off(self): self._set_color((0, 0, 0))
 
     def apply_mode(self, mode: str):
         if mode == "WAITING": self.set_idle()
         elif mode in ("VERIFYING", "DROPPING"): self.set_busy()
+        elif mode == "REJECTED": self.set_error()
         else: self.set_idle()
 
 
 # ============================================================
 # Kiosk Controller
 # ============================================================
-
 class Kiosk(QStackedWidget):
     def __init__(self, verifier_fn=None):
         super().__init__()
@@ -1614,10 +1216,7 @@ class Kiosk(QStackedWidget):
         for page in (self.main, self.deposit, self.qr, self.redeem):
             page.setFixedSize(screen.width(), screen.height())
 
-        self.addWidget(self.main)
-        self.addWidget(self.deposit)
-        self.addWidget(self.qr)
-        self.addWidget(self.redeem)
+        self.addWidget(self.main); self.addWidget(self.deposit); self.addWidget(self.qr); self.addWidget(self.redeem)
         self.setCurrentWidget(self.main)
 
         self.session_bottles = 0
@@ -1629,27 +1228,17 @@ class Kiosk(QStackedWidget):
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
         self.worker.wake_requested.connect(self.start_session_from_sensor)
-        
         self.worker.sensor_activity.connect(self.reset_idle)
-        
         self.worker.start()
 
         self.redeem.scanned_text.connect(self.on_redeem_scanned)
 
-        self.idle_timer = QTimer(self)
-        self.idle_timer.timeout.connect(self.go_main)
-
-        self.idle_indicator = IdleRing(self)
-        self.idle_indicator.raise_()
-
-        self._idle_visual_timer = QTimer(self)
-        self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
-        self._idle_visual_timer.start(16) 
-
+        self.idle_timer = QTimer(self); self.idle_timer.timeout.connect(self.go_main)
+        self.idle_indicator = IdleRing(self); self.idle_indicator.raise_()
+        self._idle_visual_timer = QTimer(self); self._idle_visual_timer.timeout.connect(self.update_idle_indicator); self._idle_visual_timer.start(33) 
         self.reset_idle()
 
-        self._filter = IdleEventFilter()
-        self._filter.activity.connect(self.reset_idle)
+        self._filter = IdleEventFilter(); self._filter.activity.connect(self.reset_idle)
         QApplication.instance().installEventFilter(self._filter)
 
     def reset_idle(self):
@@ -1658,118 +1247,70 @@ class Kiosk(QStackedWidget):
 
     def update_idle_indicator(self):
         if not hasattr(self, "idle_indicator"): return
-        remaining = self.idle_timer.remainingTime()
-        if remaining < 0: remaining = IDLE_TIMEOUT_MS
-        self.idle_indicator.set_countdown(remaining, IDLE_TIMEOUT_MS)
+        self.idle_indicator.set_countdown(self.idle_timer.remainingTime() if self.idle_timer.remainingTime() >= 0 else IDLE_TIMEOUT_MS, IDLE_TIMEOUT_MS)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "idle_indicator"):
-            margin = 22
-            self.idle_indicator.move(self.width() - self.idle_indicator.width() - margin, margin)
-            self.idle_indicator.raise_()
+        if hasattr(self, "idle_indicator"): self.idle_indicator.move(self.width() - self.idle_indicator.width() - 22, 22); self.idle_indicator.raise_()
 
     def confirm_back_from_deposit(self):
         self.snd.tap()
-        current = self.currentWidget()
-        if current not in (self.deposit, self.redeem):
-            self.go_main()
-            return
-
-        if current is self.redeem:
-            dlg = ThemedConfirmDialog(self, "Go Back?", "Are you sure you want to go back to the home screen?", yes_text="YES", no_text="NO")
-            if dlg.exec() == QDialog.DialogCode.Accepted: self.go_main()
+        if self.currentWidget() not in (self.deposit, self.redeem): return self.go_main()
+        if self.currentWidget() is self.redeem:
+            if ThemedConfirmDialog(self, "Go Back?", "Are you sure you want to go back to the home screen?", "YES", "NO").exec() == QDialog.DialogCode.Accepted: self.go_main()
             else: self.reset_idle()
             return
-
-        if self.session_bottles <= 0:
-            self.go_main()
-            return
-
-        dlg = ThemedConfirmDialog(self, "Leave This Session?", "Are you sure you want to go back?\nAll pending EcoPoints from this session will be lost.", yes_text="YES", no_text="NO")
-        if dlg.exec() == QDialog.DialogCode.Accepted: self.go_main()
+        if self.session_bottles <= 0: return self.go_main()
+        if ThemedConfirmDialog(self, "Leave This Session?", "Are you sure you want to go back?\nAll pending EcoPoints from this session will be lost.", "YES", "NO").exec() == QDialog.DialogCode.Accepted: self.go_main()
         else: self.reset_idle()
 
     def go_main(self):
-        self.worker.set_session(False)
-        self.led.set_idle()
-        self.session_bottles = 0
-        self.deposit.animate_counts(0)
-        self.setCurrentWidget(self.main)
-        self.reset_idle()
+        self.worker.set_session(False); self.led.set_idle(); self.session_bottles = 0; self.deposit.animate_counts(0); self.setCurrentWidget(self.main); self.reset_idle()
 
     def start_session_from_sensor(self):
         if self.currentWidget() is self.main: self.start_session()
 
     def start_session(self):
-        self.session_bottles = 0
-        self.deposit.animate_counts(0)
-        self.worker.set_session(True)
-        self.setCurrentWidget(self.deposit)
-        self.reset_idle()
+        self.session_bottles = 0; self.deposit.animate_counts(0); self.worker.set_session(True); self.setCurrentWidget(self.deposit); self.reset_idle()
 
     def go_redeem(self):
-        self.worker.set_session(False)
-        self.led.set_idle()
-        self.setCurrentWidget(self.redeem)
-        self.reset_idle()
+        self.worker.set_session(False); self.led.set_idle(); self.setCurrentWidget(self.redeem); self.reset_idle()
 
     def on_bottle_dropped(self):
-        self.session_bottles += 1
-        self.deposit.animate_counts(self.session_bottles)
-        self.snd.bottle()
-        QTimer.singleShot(40, self.snd.success)
+        self.session_bottles += 1; self.deposit.animate_counts(self.session_bottles)
+        self.snd.bottle(); QTimer.singleShot(40, self.snd.success)
         self.reset_idle()
 
     def finish_session(self):
-        self.worker.set_session(False)
-        self.led.set_idle()
-        bottles = self.session_bottles
-        if bottles <= 0:
-            self.go_main()
-            return
-        points = bottles * POINTS_PER_BOTTLE
+        self.worker.set_session(False); self.led.set_idle()
+        if self.session_bottles <= 0: return self.go_main()
+        points = self.session_bottles * POINTS_PER_BOTTLE
         token_id = "ECO" + uuid.uuid4().hex[:12]
-        payload = {"type": "deposit", "token": token_id, "bottles": bottles, "points": points, "ts": int(time.time()), "used": False}
-        payload_text = json.dumps(payload, separators=(",", ":"))
-        self.qr.set_qr(payload_text, bottles)
+        payload = {"type": "deposit", "token": token_id, "bottles": self.session_bottles, "points": points, "ts": int(time.time()), "used": False}
+        self.qr.set_qr(json.dumps(payload, separators=(",", ":")), self.session_bottles)
         self.setCurrentWidget(self.qr)
-        QTimer.singleShot(80, self.snd.qr_show)
-        self.reset_idle()
+        QTimer.singleShot(80, self.snd.qr_show); self.reset_idle()
         self.fb.create_deposit_token_async(token_id, payload)
 
     def on_redeem_scanned(self, scanned: str):
-        self.reset_idle()
-        self.snd.tap()
+        self.reset_idle(); self.snd.tap()
         token = scanned
         try:
-            if scanned.startswith("{") and scanned.endswith("}"):
-                obj = json.loads(scanned)
-                token = obj.get("token") or obj.get("id") or scanned
-        except Exception: token = scanned
-        token = token.strip()
-        self.redeem.status.setText("Checking token...")
-        self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
-        self.fb.consume_redeem_token_async(token)
+            if scanned.startswith("{") and scanned.endswith("}"): token = json.loads(scanned).get("token") or json.loads(scanned).get("id") or scanned
+        except Exception: pass
+        self.redeem.status.setText("Checking token..."); self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
+        self.fb.consume_redeem_token_async(token.strip())
 
     def _on_firebase_ok(self, msg: str):
         if msg == "deposit_saved": return
-        if msg == "redeem_ok":
-            self.redeem.set_scanned_ok()
-            self.snd.success()
-            QTimer.singleShot(1800, self.go_main)
-            return
-        if msg == "redeem_invalid":
-            self.redeem.set_scanned_bad()
-            QTimer.singleShot(2200, self.go_main)
-            return
+        if msg == "redeem_ok": self.redeem.set_scanned_ok(); self.snd.success(); QTimer.singleShot(1800, self.go_main)
+        if msg == "redeem_invalid": self.redeem.set_scanned_bad(); QTimer.singleShot(2200, self.go_main)
 
     def exit_app(self):
         for cleanup in [self.led.set_off, self.snd.stop_idle, lambda: (self.worker.stop(), self.worker.wait(1200)), self.verifier.release]:
             try: cleanup()
             except Exception: pass
         QApplication.instance().quit()
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
