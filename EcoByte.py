@@ -141,7 +141,9 @@ CAMERA_INDEX = 0
 ONNX_INPUT_SIZE = 640
 ONNX_CONF_THRESHOLD = 0.45
 ONNX_OPEN_TIMEOUT_S = 2.0
-CAMERA_MAIN_SENSOR = True
+ONNX_NMS_THRESHOLD = 0.40
+ONNX_VERIFY_SECONDS = 1.0
+ONNX_VERIFY_RATIO = 0.35
 
 
 # ============================================================
@@ -845,27 +847,16 @@ def make_card() -> QWidget:
 # Optional ONNX Bottle Verifier
 # ============================================================
 
-
 class ONNXBottleVerifier:
-    """YOLOv8 ONNX bottle verifier using OpenCV DNN.
-
-    - sample_once(): quick single-frame bottle check
-    - verify_once(): 1-second repeated verification before servo opens
-    - keeps the camera open between checks for faster response
-    """
     def __init__(self, base_dir: str):
         self.enabled = bool(USE_ONNX_VERIFIER)
         self.available = False
         self.reason = "disabled"
+        self.model_path = os.path.join(base_dir, ONNX_MODEL_PATH)
         self._net = None
         self._cap = None
-        self._lock = threading.Lock()
-        self.model_path = os.path.join(base_dir, ONNX_MODEL_PATH)
-        self.camera_index = CAMERA_INDEX
-
-        self.verify_seconds = 1.0
-        self.required_ratio = 0.40
-        self.min_positive_frames = 3
+        self._lock = threading.RLock()
+        self._last_qimage = None
 
         if not self.enabled:
             return
@@ -885,130 +876,137 @@ class ONNXBottleVerifier:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
 
-    def _ensure_camera(self):
+    def _ensure_camera(self) -> bool:
         if self._cap is not None and self._cap.isOpened():
             return True
         try:
-            self._cap = cv2.VideoCapture(self.camera_index)
+            self._cap = cv2.VideoCapture(CAMERA_INDEX)
             start = time.monotonic()
             while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
                 time.sleep(0.05)
             return self._cap.isOpened()
-        except Exception as e:
-            print(f"[ONNX] camera open error: {e}")
+        except Exception:
             self._cap = None
             return False
 
     def release(self):
-        try:
-            if self._cap is not None:
-                self._cap.release()
-        except Exception:
-            pass
-        self._cap = None
+        with self._lock:
+            try:
+                if self._cap is not None:
+                    self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
 
-    def _detect_bottle(self, frame):
-        if self._net is None:
-            return False, 0.0
-
+    def _detect_and_annotate(self, frame):
         h, w = frame.shape[:2]
         blob = cv2.dnn.blobFromImage(
             frame,
-            scalefactor=1 / 255.0,
+            scalefactor=1/255.0,
             size=(ONNX_INPUT_SIZE, ONNX_INPUT_SIZE),
             swapRB=True,
             crop=False
         )
-
         self._net.setInput(blob)
         outputs = self._net.forward()
+
         outputs = np.squeeze(outputs)
-        if outputs.ndim == 2:
-            outputs = outputs.T
+        if outputs.ndim == 1:
+            outputs = np.expand_dims(outputs, 0)
+        outputs = outputs.T
 
         boxes = []
         scores = []
+        best_conf = 0.0
 
         for row in outputs:
             if len(row) < 5:
                 continue
             x, y, bw, bh = row[0:4]
             score = float(row[4])
+            best_conf = max(best_conf, score)
             if score < ONNX_CONF_THRESHOLD:
                 continue
 
-            left = int((x - bw / 2) * w / ONNX_INPUT_SIZE)
-            top = int((y - bh / 2) * h / ONNX_INPUT_SIZE)
+            left = int((x - bw/2) * w / ONNX_INPUT_SIZE)
+            top = int((y - bh/2) * h / ONNX_INPUT_SIZE)
             width = int(bw * w / ONNX_INPUT_SIZE)
             height = int(bh * h / ONNX_INPUT_SIZE)
+
+            left = max(0, left)
+            top = max(0, top)
+            width = max(1, min(width, w - left if left < w else 1))
+            height = max(1, min(height, h - top if top < h else 1))
 
             boxes.append([left, top, width, height])
             scores.append(score)
 
-        if not boxes:
-            return False, 0.0
+        detected = False
+        if len(boxes) > 0:
+            indices = cv2.dnn.NMSBoxes(boxes, scores, ONNX_CONF_THRESHOLD, ONNX_NMS_THRESHOLD)
+            if len(indices) > 0:
+                detected = True
+                for i in indices:
+                    i = i[0] if isinstance(i, (tuple, list, np.ndarray)) else i
+                    x, y, bw, bh = boxes[i]
+                    cv2.rectangle(frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
+                    cv2.putText(frame, f"Bottle {scores[i]:.2f}", (x, max(28, y - 10)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
 
-        indices = cv2.dnn.NMSBoxes(boxes, scores, ONNX_CONF_THRESHOLD, 0.4)
-        if indices is None or len(indices) == 0:
-            return False, max(scores) if scores else 0.0
+        return frame, detected, best_conf
 
-        best_score = 0.0
-        for i in indices:
-            i = i[0] if isinstance(i, (tuple, list, np.ndarray)) else i
-            best_score = max(best_score, float(scores[i]))
+    def _store_qimage(self, frame_bgr):
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        self._last_qimage = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
-        return True, best_score
-
-    def sample_once(self) -> bool:
-        if not self.enabled or not self.available or self._net is None:
-            return False
-
+    def get_preview_qimage(self):
+        if not self.available or self._net is None:
+            return None
         with self._lock:
             if not self._ensure_camera():
-                print("[ONNX] camera failed to open")
-                return False
-            ret, frame = self._cap.read()
-            if not ret or frame is None:
-                return False
-            detected, conf = self._detect_bottle(frame)
-            if detected:
-                print(f"[ONNX] quick detect conf={conf:.3f}")
-            return detected
+                return self._last_qimage
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return self._last_qimage
+            annotated, _, _ = self._detect_and_annotate(frame)
+            self._store_qimage(annotated)
+            return self._last_qimage
 
     def verify_once(self) -> bool:
-        if not self.enabled or not self.available or self._net is None:
+        if not self.available or self._net is None:
             return True
 
         with self._lock:
             if not self._ensure_camera():
-                print("[ONNX] camera failed to open; rejecting")
-                return False
+                print('[ONNX] camera failed to open; allowing ultrasonic fallback')
+                return True
 
             start = time.monotonic()
             frames = 0
             positives = 0
-            best_seen = 0.0
+            best = 0.0
 
-            while (time.monotonic() - start) < self.verify_seconds:
-                ret, frame = self._cap.read()
-                if not ret or frame is None:
-                    time.sleep(0.01)
+            while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
+                ok, frame = self._cap.read()
+                if not ok or frame is None:
                     continue
-
+                annotated, detected, conf = self._detect_and_annotate(frame)
+                self._store_qimage(annotated)
                 frames += 1
-                detected, best_score = self._detect_bottle(frame)
-                best_seen = max(best_seen, best_score)
                 if detected:
                     positives += 1
-                time.sleep(0.01)
+                best = max(best, conf)
+                time.sleep(0.02)
 
             if frames == 0:
-                print("[ONNX] no frames received; rejecting")
-                return False
+                print('[ONNX] no frames during verify; allowing ultrasonic fallback')
+                return True
 
             ratio = positives / frames
-            print(f"[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best_seen:.3f}")
-            return positives >= self.min_positive_frames and ratio >= self.required_ratio
+            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f}')
+            return ratio >= ONNX_VERIFY_RATIO
 
 # ============================================================
 # Hardware Worker
@@ -1019,11 +1017,9 @@ class HardwareWorker(QThread):
     dropped = pyqtSignal()
     wake_requested = pyqtSignal()
 
-    def __init__(self, verifier_fn=None, quick_check_fn=None, camera_main=False):
+    def __init__(self, verifier_fn=None):
         super().__init__()
         self.verifier_fn = verifier_fn
-        self.quick_check_fn = quick_check_fn
-        self.camera_main = camera_main
         self.running = True
         self.session_enabled = False
         self._verifying = False
@@ -1112,14 +1108,7 @@ class HardwareWorker(QThread):
 
         try:
             while self.running:
-                if self.camera_main and self.quick_check_fn is not None:
-                    try:
-                        ready = bool(self.quick_check_fn())
-                    except Exception as e:
-                        print(f"[VERIFY] quick check error: {e}")
-                        ready = self._object_present()
-                else:
-                    ready = self._object_present()
+                ready = self._object_present()
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -1157,36 +1146,31 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("VERIFYING")
 
                 if self._verifying:
-                    if not ready:
+                    self.ui_mode.emit("VERIFYING")
+                    if (time.monotonic() - self._verify_start) >= VERIFY_SECONDS:
+                        allow_drop = True
+                        if self.verifier_fn is not None:
+                            try:
+                                allow_drop = bool(self.verifier_fn())
+                            except Exception as e:
+                                print(f"[VERIFY] verifier callback error: {e}")
+                                allow_drop = True
+
                         self._verifying = False
-                        self._latched = False
-                        self.ui_mode.emit("WAITING")
-                    else:
-                        self.ui_mode.emit("VERIFYING")
-                        if (time.monotonic() - self._verify_start) >= VERIFY_SECONDS:
-                            allow_drop = True
-                            if self.verifier_fn is not None:
-                                try:
-                                    allow_drop = bool(self.verifier_fn())
-                                except Exception as e:
-                                    print(f"[VERIFY] verifier callback error: {e}")
-                                    allow_drop = True
 
-                            self._verifying = False
+                        if not allow_drop:
+                            self._latched = False
+                            self.ui_mode.emit("WAITING")
+                        else:
+                            self.ui_mode.emit("DROPPING")
 
-                            if not allow_drop:
-                                self._latched = False
-                                self.ui_mode.emit("WAITING")
-                            else:
-                                self.ui_mode.emit("DROPPING")
+                            servo_pulse(SERVO_OPEN_US)
+                            time.sleep(GATE_OPEN_MS / 1000.0)
+                            servo_pulse(SERVO_CLOSED_US, hold=True)
 
-                                servo_pulse(SERVO_OPEN_US)
-                                time.sleep(GATE_OPEN_MS / 1000.0)
-                                servo_pulse(SERVO_CLOSED_US, hold=True)
-
-                                self._waiting_clear = True
-                                self._clear_wait_start = time.monotonic()
-                                self.dropped.emit()
+                            self._waiting_clear = True
+                            self._clear_wait_start = time.monotonic()
+                            self.dropped.emit()
                 else:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
                     self.ui_mode.emit("WAITING")
@@ -1394,45 +1378,60 @@ class MainScreen(WaterBackground):
 
 
 class DepositScreen(WaterBackground):
-    def __init__(self, kiosk, bottle_png_path: str):
+    def __init__(self, kiosk, bottle_png_path: str, verifier=None):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
         self.kiosk = kiosk
+        self.verifier = verifier
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(70, 85, 70, 65)
-        root.setSpacing(14)
+        root.setContentsMargins(70, 70, 70, 50)
+        root.setSpacing(12)
 
         header = QLabel("Insert Bottle")
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setFont(QFont(FONT_FAMILY, 68, QFont.Weight.Bold))
+        header.setFont(QFont(FONT_FAMILY, 60, QFont.Weight.Bold))
         header.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.status = QLabel("Waiting for bottle...")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setFont(QFont(FONT_FAMILY, 34))
+        self.status.setFont(QFont(FONT_FAMILY, 28))
         self.status.setStyleSheet("color: rgba(255,255,255,0.90);")
 
         card = make_card()
-        card.setFixedHeight(470)
-        card.setFixedWidth(860)
+        card.setFixedHeight(650)
+        card.setFixedWidth(900)
         cl = QVBoxLayout(card)
-        cl.setContentsMargins(56, 54, 56, 54)
-        cl.setSpacing(10)
+        cl.setContentsMargins(40, 34, 40, 34)
+        cl.setSpacing(16)
+
+        self.camera_title = QLabel("Camera Verification")
+        self.camera_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_title.setFont(QFont(FONT_FAMILY, 22, QFont.Weight.Bold))
+        self.camera_title.setStyleSheet("color: rgba(255,255,255,0.90);")
+
+        self.camera_label = QLabel()
+        self.camera_label.setFixedSize(760, 300)
+        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_label.setStyleSheet(
+            "background: rgba(0,0,0,0.22); border: 2px solid rgba(255,255,255,0.18); border-radius: 24px; color: rgba(255,255,255,0.70);"
+        )
+        self.camera_label.setText("Camera preview will appear here")
 
         self.bottles_lbl = AnimatedNumberLabel("Bottles: ")
         self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 58, QFont.Weight.Bold))
+        self.bottles_lbl.setFont(QFont(FONT_FAMILY, 48, QFont.Weight.Bold))
         self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);")
 
         self.points_lbl = AnimatedNumberLabel("EcoPoints: ")
         self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.points_lbl.setFont(QFont(FONT_FAMILY, 52, QFont.Weight.Bold))
+        self.points_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold))
         self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);")
 
-        cl.addStretch(1)
+        cl.addWidget(self.camera_title)
+        cl.addWidget(self.camera_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        cl.addSpacing(8)
         cl.addWidget(self.bottles_lbl)
         cl.addWidget(self.points_lbl)
-        cl.addStretch(1)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(18)
@@ -1455,16 +1454,33 @@ class DepositScreen(WaterBackground):
         root.addStretch(1)
         root.addLayout(btn_row)
 
+        self._preview_timer = QTimer(self)
+        self._preview_timer.timeout.connect(self._update_preview)
+        self._preview_timer.start(90)
+
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
         self._corner.move(0, 0)
+
+    def _update_preview(self):
+        if self.verifier is None or not getattr(self.verifier, 'available', False):
+            return
+        qimg = self.verifier.get_preview_qimage()
+        if qimg is None or qimg.isNull():
+            return
+        pm = QPixmap.fromImage(qimg).scaled(
+            self.camera_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.camera_label.setPixmap(pm)
 
     def set_mode(self, mode: str):
         if mode == "WAITING":
             self.status.setText("Waiting for bottle...")
         elif mode == "VERIFYING":
-            self.status.setText("Confirming... Please wait")
+            self.status.setText("Confirming bottle... Please hold it steady")
         elif mode == "DROPPING":
-            self.status.setText("Processing...")
+            self.status.setText("Bottle accepted. Processing...")
 
     def animate_counts(self, bottles: int):
         self.bottles_lbl.animate_to(bottles)
@@ -1750,11 +1766,9 @@ class ThemedConfirmDialog(QDialog):
 # ============================================================
 
 class Kiosk(QStackedWidget):
-    def __init__(self, verifier_fn=None, quick_check_fn=None, camera_main=False):
+    def __init__(self, verifier_fn=None):
         super().__init__()
         self.verifier_fn = verifier_fn
-        self.quick_check_fn = quick_check_fn
-        self.camera_main = camera_main
 
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -1782,7 +1796,7 @@ class Kiosk(QStackedWidget):
         bottle_png = os.path.join(base_dir, "assets", "bottle.png")
 
         self.main = MainScreen(self, bottle_png)
-        self.deposit = DepositScreen(self, bottle_png)
+        self.deposit = DepositScreen(self, bottle_png, self.verifier)
         self.qr = QRScreen(self, bottle_png)
         self.redeem = RedeemScreen(self, bottle_png)
 
@@ -1801,11 +1815,7 @@ class Kiosk(QStackedWidget):
         self.led = LEDController(self)
         self.led.set_idle()  # always green on startup/main screen
 
-        self.worker = HardwareWorker(
-            verifier_fn=self.verifier.verify_once if self.verifier.available else None,
-            quick_check_fn=self.verifier.sample_once if self.verifier.available else None,
-            camera_main=CAMERA_MAIN_SENSOR and self.verifier.available
-        )
+        self.worker = HardwareWorker(verifier_fn=self.verifier.verify_once if self.verifier.available else None)
         self.worker.ui_mode.connect(self.deposit.set_mode)
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
@@ -1986,10 +1996,6 @@ class Kiosk(QStackedWidget):
 
     def exit_app(self):
         try:
-            self.verifier.release()
-        except Exception:
-            pass
-        try:
             self.led.set_off()
         except Exception:
             pass
@@ -2000,6 +2006,10 @@ class Kiosk(QStackedWidget):
         try:
             self.worker.stop()
             self.worker.wait(1200)
+        except Exception:
+            pass
+        try:
+            self.verifier.release()
         except Exception:
             pass
         QApplication.instance().quit()
