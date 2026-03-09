@@ -314,7 +314,7 @@ class WaterBackground(QWidget):
 
     def _draw_ridged_vector_bottle(self, p: QPainter, cx: float, cy: float, s: float, alpha: int):
         body_w, body_h = 46 * s, 90 * s
-        neck_w, neck_h, cap_h = 22 * s, 14 * s, cap_h = 6 * s
+        neck_w, neck_h, cap_h = 22 * s, 14 * s, 6 * s
         x0, y0 = cx - body_w / 2, cy - body_h / 2
 
         path = QPainterPath()
