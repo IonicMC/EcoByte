@@ -854,7 +854,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Dual-Threaded ONNX Bottle Verifier (Zero Lag Preview)
+# Dual-Threaded ONNX Bottle Verifier + OpenCV Tracker
 # ============================================================
 
 class ONNXBottleVerifier:
@@ -874,6 +874,11 @@ class ONNXBottleVerifier:
         self._last_detection = False
         self._last_conf = 0.0
         self._frame_count = 0
+        
+        # Tracking State
+        self._tracker = None
+        self._tracking_bbox = None
+        self._needs_tracker_sync = False
         
         self.running = False
 
@@ -898,13 +903,25 @@ class ONNXBottleVerifier:
             self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
             self._capture_thread.start()
             
-            # Thread 2: Run inference entirely separated from camera pulling
+            # Thread 2: Run YOLO inference entirely separated from camera pulling
             self._inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
             self._inference_thread.start()
             
         except Exception as e:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
+
+    def _create_tracker(self):
+        """Safely creates a KCF tracker depending on the OpenCV version installed."""
+        try:
+            return cv2.TrackerKCF_create()
+        except AttributeError:
+            try:
+                # In some newer OpenCV versions, trackers were moved to legacy
+                return cv2.legacy.TrackerKCF_create()
+            except AttributeError:
+                print("[ONNX] KCF Tracker missing. Falling back to basic bounding boxes.")
+                return None
 
     def _ensure_camera(self) -> bool:
         if self._cap is not None and self._cap.isOpened():
@@ -946,13 +963,12 @@ class ONNXBottleVerifier:
             ok, frame = self._cap.read()
             if ok and frame is not None:
                 with self._lock:
-                    # Keep the absolute newest frame memory-safe for the other thread
                     self._raw_frame = frame.copy()
             else:
                 time.sleep(0.01)
 
     def _inference_loop(self):
-        """Thread 2: Runs AI on the newest frame available."""
+        """Thread 2: Runs heavy AI on the newest frame available."""
         while self.running:
             frame_to_infer = None
             with self._lock:
@@ -971,16 +987,17 @@ class ONNXBottleVerifier:
                 self._last_conf = best_conf
                 self._frame_count += 1
                 
+                # Tell the UI thread that a fresh YOLO box is ready for the tracker
+                if detected and len(kept) > 0:
+                    self._needs_tracker_sync = True
+                
             time.sleep(0.01) # Breathe CPU
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
         blob = cv2.dnn.blobFromImage(
-            frame,
-            scalefactor=1/255.0,
-            size=(ONNX_INPUT_SIZE, ONNX_INPUT_SIZE),
-            swapRB=True,
-            crop=False
+            frame, scalefactor=1/255.0, size=(ONNX_INPUT_SIZE, ONNX_INPUT_SIZE),
+            swapRB=True, crop=False
         )
         self._net.setInput(blob)
         outputs = self._net.forward()
@@ -990,18 +1007,15 @@ class ONNXBottleVerifier:
             outputs = np.expand_dims(outputs, 0)
         outputs = outputs.T
 
-        boxes = []
-        scores = []
+        boxes, scores = [], []
         best_conf = 0.0
 
         for row in outputs:
-            if len(row) < 5:
-                continue
+            if len(row) < 5: continue
             x, y, bw, bh = row[0:4]
             score = float(row[4])
             best_conf = max(best_conf, score)
-            if score < ONNX_CONF_THRESHOLD:
-                continue
+            if score < ONNX_CONF_THRESHOLD: continue
 
             left = int((x - bw/2) * w / ONNX_INPUT_SIZE)
             top = int((y - bh/2) * h / ONNX_INPUT_SIZE)
@@ -1026,15 +1040,8 @@ class ONNXBottleVerifier:
         detected = len(kept) > 0
         return kept, detected, best_conf
 
-    def _annotate(self, frame, kept):
-        for (x, y, bw, bh), score in kept:
-            cv2.rectangle(frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
-            cv2.putText(frame, f"Bottle {score:.2f}", (x, max(28, y - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
-        return frame
-
     def get_preview_qimage(self):
-        """Called by UI thread: Overlays newest AI data on newest frame instantly."""
+        """Called by UI thread (30fps): Updates the fast tracker and draws the box."""
         if not self.available:
             return None
             
@@ -1042,9 +1049,43 @@ class ONNXBottleVerifier:
             if self._raw_frame is None:
                 return None
             disp_frame = self._raw_frame.copy()
+            sync_needed = self._needs_tracker_sync
             bboxes = list(self._latest_bboxes)
+            self._needs_tracker_sync = False
 
-        disp_frame = self._annotate(disp_frame, bboxes)
+        # If YOLO just found something, sync the tracker to the highly accurate YOLO box
+        if sync_needed and len(bboxes) > 0:
+            # Grab the box with the highest confidence (first one)
+            best_yolo_box = bboxes[0][0] # (x, y, w, h)
+            
+            self._tracker = self._create_tracker()
+            if self._tracker is not None:
+                self._tracker.init(disp_frame, tuple(best_yolo_box))
+                self._tracking_bbox = best_yolo_box
+                
+        # If we have a tracker running, update it on this fresh frame
+        elif self._tracker is not None:
+            success, bbox = self._tracker.update(disp_frame)
+            if success:
+                self._tracking_bbox = [int(v) for v in bbox]
+            else:
+                self._tracking_bbox = None # Lost tracking
+
+        # Draw the tracked box (or fallback to YOLO boxes if tracker failed/missing)
+        if self._tracking_bbox is not None and self._tracker is not None:
+            x, y, bw, bh = self._tracking_bbox
+            cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
+            # Fetch the last known YOLO score for the label
+            score = bboxes[0][1] if bboxes else 0.0
+            cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
+        else:
+            # Fallback: Just draw the raw YOLO boxes if tracking drops
+            for (x, y, bw, bh), score in bboxes:
+                cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
+                cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
+
         rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
@@ -1052,30 +1093,17 @@ class ONNXBottleVerifier:
         return QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
     def quick_detect(self) -> bool:
-        """Returns the latest detection state instantly."""
-        if not self.available:
-            return False
-        with self._lock:
-            return self._last_detection
+        if not self.available: return False
+        with self._lock: return self._last_detection
 
     def verify_once(self) -> bool:
-        """Checks background detections across 1 second."""
-        if not self.available:
-            return True
-
+        if not self.available: return True
         start = time.monotonic()
-        positives = 0
-        reads = 0
-        last_frame = -1
-        best = 0.0
-        consecutive = 0
-        best_consecutive = 0
+        positives, reads, last_frame, best, consecutive, best_consecutive = 0, 0, -1, 0.0, 0, 0
 
         while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
             with self._lock:
-                current_frame = self._frame_count
-                det = self._last_detection
-                conf = self._last_conf
+                current_frame, det, conf = self._frame_count, self._last_detection, self._last_conf
 
             if current_frame != last_frame:
                 reads += 1
@@ -1085,18 +1113,12 @@ class ONNXBottleVerifier:
                     positives += 1
                     consecutive += 1
                     best_consecutive = max(best_consecutive, consecutive)
-                else:
-                    consecutive = 0
+                else: consecutive = 0
 
             time.sleep(0.015)
 
-        if reads == 0:
-            print('[ONNX] no frames during verify; allowing fallback')
-            return True
-
-        ratio = positives / reads if reads > 0 else 0
+        if reads == 0: return True
         accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
-        print(f'[ONNX] verify positives={positives}/{reads} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
         return accepted
 
 
