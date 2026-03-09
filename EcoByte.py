@@ -121,16 +121,16 @@ BTN_H = 124
 SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
-# Background animation (Now targeted at ~60fps)
-WATER_FPS_MS = 16
-WAVE_SPEED = 0.016
+# Background animation
+WATER_FPS_MS = 33     # Capped at ~30 FPS to stop the Pi from choking
+WAVE_SPEED = 0.08     # Much faster wave phasing
 WAVE_OPACITY = 0.18
 
-# Falling bottles (Scaled down for 60fps)
-BOTTLE_COUNT = 10
+# Falling bottles
+BOTTLE_COUNT = 10     
 BOTTLE_ALPHA = 44
-BOTTLE_SPEED_MIN = 0.5
-BOTTLE_SPEED_MAX = 1
+BOTTLE_SPEED_MIN = 6.0  # Drastically increased to fall faster
+BOTTLE_SPEED_MAX = 14.0 # Drastically increased
 
 # Firebase
 FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -1106,14 +1106,14 @@ class BouncingArrow(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if not self._timer.isActive():
-            self._timer.start(16) # ~60 FPS
+            self._timer.start(33) # Relaxed to 30 FPS
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self._timer.stop()
 
     def _tick(self):
-        self._offset += 0.21 * self._dir # Slower, smoother step per frame
+        self._offset += 1.8 * self._dir # Larger step per frame for a faster bounce
         if self._offset > 24: self._dir = -1
         elif self._offset < -8: self._dir = 1
         self.update()
@@ -1646,7 +1646,7 @@ class Kiosk(QStackedWidget):
 
         self._idle_visual_timer = QTimer(self)
         self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
-        self._idle_visual_timer.start(16) # Smooth 60fps countdown circle
+        self._idle_visual_timer.start(33) # Changed from 16 to 33
 
         self.reset_idle()
 
