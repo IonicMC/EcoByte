@@ -99,7 +99,6 @@ GPIO_ECHO = 24
 GPIO_SERVO = 16
 
 # Ultrasonic-only fallback mode
-# A bottle is considered present when it is close to the chute sensor.
 ULTRA_MIN_CM = 2.0
 ULTRA_MAX_CM = 18.0
 ULTRA_TIMEOUT_S = 0.03
@@ -114,10 +113,10 @@ GATE_OPEN_MS = 900
 POINTS_PER_BOTTLE = 5
 
 # WS2812B LED strip (GPIO18 / Pin 12)
-LED_COUNT = 60          # change if your strip has a different LED count
-LED_BRIGHTNESS = 0.35   # 0.0 - 1.0
-LED_IDLE_COLOR = (0, 255, 0)      # Green (ready / idle)
-LED_VERIFY_COLOR = (255, 0, 0)    # Red (verifying / busy)
+LED_COUNT = 60          
+LED_BRIGHTNESS = 0.35   
+LED_IDLE_COLOR = (0, 255, 0)      
+LED_VERIFY_COLOR = (255, 0, 0)    
 
 # UI sizing
 BTN_W = 600
@@ -140,7 +139,7 @@ BOTTLE_SPEED_MAX = 1.9
 FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
 FIREBASE_TIMEOUT_S = 3.5
 
-# Optional ONNX bottle verifier (disabled until camera is connected)
+# Optional ONNX bottle verifier
 USE_ONNX_VERIFIER = True
 ONNX_MODEL_PATH = "best.onnx"
 CAMERA_INDEX = 0
@@ -149,9 +148,8 @@ ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
-ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 220
+PREVIEW_INTERVAL_MS = 60  # <-- Changed for smoother UI
 
 
 # ============================================================
@@ -860,7 +858,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Optional ONNX Bottle Verifier
+# Background ONNX Bottle Verifier
 # ============================================================
 
 class ONNXBottleVerifier:
@@ -872,11 +870,12 @@ class ONNXBottleVerifier:
         self._net = None
         self._cap = None
         self._lock = threading.RLock()
+        
         self._last_qimage = None
         self._last_detection = False
         self._last_conf = 0.0
-        self._last_preview_infer_ts = 0.0
-        self._preview_infer_interval_s = 0.25
+        self._frame_count = 0
+        self.running = False
 
         if not self.enabled:
             return
@@ -892,6 +891,11 @@ class ONNXBottleVerifier:
             self.available = True
             self.reason = "ready"
             print(f"[ONNX] loaded {self.model_path}")
+
+            self.running = True
+            # Spawn a dedicated background thread for continuous inference
+            self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._capture_thread.start()
         except Exception as e:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
@@ -914,6 +918,7 @@ class ONNXBottleVerifier:
             return False
 
     def release(self):
+        self.running = False
         with self._lock:
             try:
                 if self._cap is not None:
@@ -921,6 +926,30 @@ class ONNXBottleVerifier:
             except Exception:
                 pass
             self._cap = None
+
+    def _capture_loop(self):
+        """Dedicated background loop for inference (Prevents UI freezing)."""
+        while self.running:
+            if not self._ensure_camera():
+                time.sleep(0.5)
+                continue
+
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                time.sleep(0.05)
+                continue
+
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
+
+            with self._lock:
+                self._store_qimage(annotated)
+                self._last_detection = detected
+                self._last_conf = best_conf
+                self._frame_count += 1
+                
+            # Yield CPU briefly so the Pi doesn't cook itself
+            time.sleep(0.02)
 
     def _run_model(self, frame):
         h, w = frame.shape[:2]
@@ -986,90 +1015,63 @@ class ONNXBottleVerifier:
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
+        # Critical copy so QImage owns the memory and avoids UI artifacts
         self._last_qimage = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
     def get_preview_qimage(self):
-        if not self.available or self._net is None:
+        """Returns the pre-rendered image instantly."""
+        if not self.available:
             return None
-        if not self._lock.acquire(blocking=False):
+        with self._lock:
             return self._last_qimage
-        try:
-            if not self._ensure_camera():
-                return self._last_qimage
-            now = time.monotonic()
-            if self._last_qimage is not None and (now - self._last_preview_infer_ts) < self._preview_infer_interval_s:
-                return self._last_qimage
-            ok, frame = self._cap.read()
-            if not ok or frame is None:
-                return self._last_qimage
-            kept, detected, best_conf = self._run_model(frame)
-            annotated = self._annotate(frame, kept)
-            self._store_qimage(annotated)
-            self._last_detection = detected
-            self._last_conf = best_conf
-            self._last_preview_infer_ts = now
-            return self._last_qimage
-        finally:
-            self._lock.release()
 
     def quick_detect(self) -> bool:
-        if not self.available or self._net is None:
+        """Returns the latest detection state instantly."""
+        if not self.available:
             return False
         with self._lock:
-            if not self._ensure_camera():
-                return False
-            ok, frame = self._cap.read()
-            if not ok or frame is None:
-                return False
-            kept, detected, best_conf = self._run_model(frame)
-            annotated = self._annotate(frame, kept)
-            self._store_qimage(annotated)
-            self._last_detection = detected
-            self._last_conf = best_conf
-            return detected
+            return self._last_detection
 
     def verify_once(self) -> bool:
-        if not self.available or self._net is None:
+        """Checks background detections across 1 second."""
+        if not self.available:
             return True
 
-        with self._lock:
-            if not self._ensure_camera():
-                print('[ONNX] camera failed to open; allowing fallback')
-                return True
+        start = time.monotonic()
+        positives = 0
+        reads = 0
+        last_frame = -1
+        best = 0.0
+        consecutive = 0
+        best_consecutive = 0
 
-            start = time.monotonic()
-            frames = 0
-            positives = 0
-            best = 0.0
-            consecutive = 0
-            best_consecutive = 0
+        while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
+            with self._lock:
+                current_frame = self._frame_count
+                det = self._last_detection
+                conf = self._last_conf
 
-            while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
-                ok, frame = self._cap.read()
-                if not ok or frame is None:
-                    time.sleep(0.01)
-                    continue
-                kept, detected, conf = self._run_model(frame)
-                annotated = self._annotate(frame, kept)
-                self._store_qimage(annotated)
-                frames += 1
+            if current_frame != last_frame:
+                reads += 1
+                last_frame = current_frame
                 best = max(best, conf)
-                if detected:
+                if det:
                     positives += 1
                     consecutive += 1
                     best_consecutive = max(best_consecutive, consecutive)
                 else:
                     consecutive = 0
-                time.sleep(0.015)
 
-            if frames == 0:
-                print('[ONNX] no frames during verify; allowing fallback')
-                return True
+            time.sleep(0.015)
 
-            ratio = positives / frames
-            accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
-            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
-            return accepted
+        if reads == 0:
+            print('[ONNX] no frames during verify; allowing fallback')
+            return True
+
+        ratio = positives / reads if reads > 0 else 0
+        accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
+        print(f'[ONNX] verify positives={positives}/{reads} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
+        return accepted
 
 
 # ============================================================
