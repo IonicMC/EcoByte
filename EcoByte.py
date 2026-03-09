@@ -127,10 +127,10 @@ WAVE_SPEED = 0.016
 WAVE_OPACITY = 0.18
 
 # Falling bottles (Scaled down for 60fps)
-BOTTLE_COUNT = 3
+BOTTLE_COUNT = 10
 BOTTLE_ALPHA = 44
-BOTTLE_SPEED_MIN = 0.15
-BOTTLE_SPEED_MAX = 0.45
+BOTTLE_SPEED_MIN = 0.5
+BOTTLE_SPEED_MAX = 1
 
 # Firebase
 FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
