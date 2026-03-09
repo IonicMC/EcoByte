@@ -95,7 +95,7 @@ SERVO_OPEN_US = 1200
 
 POINTS_PER_BOTTLE = 5
 
-# WS2812B LED strip (MOVED TO D10/SPI TO FIX AUDIO FLICKER)
+# WS2812B LED strip
 LED_COUNT = 60          
 LED_BRIGHTNESS = 0.35   
 LED_IDLE_COLOR = (0, 255, 0)      
@@ -105,7 +105,7 @@ LED_VERIFY_COLOR = (255, 0, 0)
 BTN_W, BTN_H = 600, 124
 SMALL_BTN_W, SMALL_BTN_H = 320, 98
 
-# Background animation (Capped at 30fps to stop overheating, speeds doubled)
+# Background animation
 WATER_FPS_MS = 33
 WAVE_SPEED = 0.08
 WAVE_OPACITY = 0.18
@@ -405,6 +405,8 @@ class SecretExitCorner(QPushButton):
 class ThemedConfirmDialog(QDialog):
     def __init__(self, parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "No"):
         super().__init__(parent)
+        # WA_TranslucentBackground fixes the sharp black window corners on Linux X11!
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setModal(True)
         self.setFixedSize(760, 360)
@@ -549,7 +551,7 @@ def make_card() -> QWidget:
 
 
 # ============================================================
-# Dual-Threaded ONNX Bottle Verifier + OpenCV Tracker
+# Dual-Threaded ONNX Bottle Verifier (Zero UI Lag)
 # ============================================================
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
@@ -561,9 +563,19 @@ class ONNXBottleVerifier:
         self._net, self._cap = None, None
         self._lock = threading.RLock()
         
-        self._raw_frame, self._latest_bboxes = None, []
-        self._last_detection, self._last_conf, self._frame_count = False, 0.0, 0
-        self._tracker, self._tracking_bbox, self._needs_tracker_sync = None, None, False
+        self._raw_frame_for_inference = None
+        self._latest_bboxes = []
+        self._best_new_box = None
+        self._last_detection = False
+        self._last_conf = 0.0
+        self._frame_count = 0
+        
+        self._tracker = None
+        self._needs_tracker_sync = False
+        
+        # This holds the completed, fully-drawn QImage so the UI thread does no work!
+        self._preview_qimage = None 
+        
         self.running = False
 
         if not self.enabled: return
@@ -615,19 +627,61 @@ class ONNXBottleVerifier:
             self._cap = None
 
     def _capture_loop(self):
+        # Thread 1 completely handles grabbing frames AND running the tracker, leaving UI clean
         while self.running:
             if not self._ensure_camera():
                 time.sleep(0.5); continue
+                
             ok, frame = self._cap.read()
             if ok and frame is not None:
-                with self._lock: self._raw_frame = frame.copy()
+                with self._lock:
+                    self._raw_frame_for_inference = frame.copy()
+                    sync_needed = self._needs_tracker_sync
+                    self._needs_tracker_sync = False
+                    best_box = self._best_new_box
+                    yolo_boxes = list(self._latest_bboxes)
+
+                disp_frame = frame.copy()
+                tracking_bbox = None
+
+                # Initialize or update tracker on this background thread
+                if sync_needed and best_box:
+                    self._tracker = self._create_tracker()
+                    if self._tracker is not None:
+                        self._tracker.init(disp_frame, tuple(best_box))
+                        tracking_bbox = best_box
+                elif self._tracker is not None:
+                    success, bbox = self._tracker.update(disp_frame)
+                    if success: tracking_bbox = [int(v) for v in bbox]
+
+                # Draw the boxes
+                if tracking_bbox is not None and self._tracker is not None:
+                    x, y, bw, bh = tracking_bbox
+                    cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
+                    score = yolo_boxes[0][1] if yolo_boxes else 0.0
+                    cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
+                else:
+                    for (x, y, bw, bh), score in yolo_boxes:
+                        cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
+                        cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
+
+                # Prepare the QImage so the UI thread doesn't have to
+                rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb.shape
+                bytes_per_line = ch * w
+                qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                
+                with self._lock:
+                    self._preview_qimage = qimg
+                    
             else: time.sleep(0.01)
 
     def _inference_loop(self):
         while self.running:
             frame_to_infer = None
             with self._lock:
-                if self._raw_frame is not None: frame_to_infer = self._raw_frame.copy()
+                if self._raw_frame_for_inference is not None: 
+                    frame_to_infer = self._raw_frame_for_inference.copy()
             
             if frame_to_infer is None:
                 time.sleep(0.05); continue
@@ -639,7 +693,9 @@ class ONNXBottleVerifier:
                 self._last_detection = detected
                 self._last_conf = best_conf
                 self._frame_count += 1
-                if detected and len(kept) > 0: self._needs_tracker_sync = True
+                if detected and len(kept) > 0: 
+                    self._best_new_box = kept[0][0]
+                    self._needs_tracker_sync = True
                 
             time.sleep(0.02)
 
@@ -680,39 +736,9 @@ class ONNXBottleVerifier:
         return kept, len(kept) > 0, best_conf
 
     def get_preview_qimage(self):
+        # Called by UI Thread: Completely instantaneous, ZERO LAG
         if not self.available: return None
-        with self._lock:
-            if self._raw_frame is None: return None
-            disp_frame = self._raw_frame.copy()
-            sync_needed = self._needs_tracker_sync
-            bboxes = list(self._latest_bboxes)
-            self._needs_tracker_sync = False
-
-        if sync_needed and len(bboxes) > 0:
-            best_yolo_box = bboxes[0][0]
-            self._tracker = self._create_tracker()
-            if self._tracker is not None:
-                self._tracker.init(disp_frame, tuple(best_yolo_box))
-                self._tracking_bbox = best_yolo_box
-        elif self._tracker is not None:
-            success, bbox = self._tracker.update(disp_frame)
-            if success: self._tracking_bbox = [int(v) for v in bbox]
-            else: self._tracking_bbox = None
-
-        if self._tracking_bbox is not None and self._tracker is not None:
-            x, y, bw, bh = self._tracking_bbox
-            cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
-            score = bboxes[0][1] if bboxes else 0.0
-            cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
-        else:
-            for (x, y, bw, bh), score in bboxes:
-                cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
-                cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
-
-        rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        bytes_per_line = ch * w
-        return QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        with self._lock: return self._preview_qimage
 
     def quick_detect(self) -> bool:
         if not self.available: return False
@@ -739,7 +765,7 @@ class ONNXBottleVerifier:
         return accepted
 
 # ============================================================
-# Hardware Worker (Includes Strict Reject Logic)
+# Hardware Worker 
 # ============================================================
 class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
@@ -813,20 +839,18 @@ class HardwareWorker(QThread):
         try:
             while self.running:
                 
-                # 1. State: Object must be fully removed (Debounced for 1.5 seconds)
+                # 1. State: Object must be fully removed 
                 if self._waiting_for_removal:
                     if self._object_present():
-                        # Keep resetting the clear timer as long as the object is still here
                         self._clear_start_time = time.monotonic() 
                     elif (time.monotonic() - self._clear_start_time) > 1.5:
-                        # Sensor has been completely clear for 1.5 continuous seconds
                         self._waiting_for_removal = False
                         self._latched = False
                         self.ui_mode.emit("WAITING")
                     self.msleep(100)
                     continue
                 
-                # 2. State: Cooldown block to prevent double-reads
+                # 2. State: Cooldown block
                 if self._in_cooldown:
                     time.sleep(COOLDOWN_SECONDS)
                     self._in_cooldown = False
@@ -834,7 +858,7 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("WAITING")
                     continue
 
-                # 3. Main Loop: ULTRASONIC ONLY triggers the wake-up (stops camera ghosting)
+                # 3. Main Loop
                 ready = self._object_present()
 
                 if ready:
@@ -872,19 +896,16 @@ class HardwareWorker(QThread):
                         self._verifying = False
 
                         if not allow_drop:
-                            # === REJECT LOGIC ===
                             self.ui_mode.emit("REJECTED")
                             self._waiting_for_removal = True
-                            self._clear_start_time = time.monotonic() # Start the removal debounce timer
+                            self._clear_start_time = time.monotonic() 
                         else:
-                            # === ACCEPT & DROP LOGIC ===
                             self.ui_mode.emit("DROPPING")
                             servo_pulse(SERVO_OPEN_US)
                             
                             drop_start = time.monotonic()
                             bottle_fell = False
                             
-                            # Wait UP TO 3.0 seconds for the bottle to drop and trigger IR
                             while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
                                 if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
@@ -1151,23 +1172,26 @@ class LEDController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixels = None
+        self._current_color = None  # Cache to prevent SPI flooding
+        
         if neopixel is None or board is None: return
         try:
-            # We use D10 here because SPI prevents the PWM audio flickering
             self._pixels = neopixel.NeoPixel(board.D10, LED_COUNT, brightness=LED_BRIGHTNESS, auto_write=True, pixel_order=neopixel.GRB)
             self.set_idle()
         except Exception: self._pixels = None
 
     def _set_color(self, rgb):
         if self._pixels:
+            if self._current_color == rgb: return # Debounce to prevent flicker!
+            self._current_color = rgb
             try:
-                self._pixels.fill((0, 0, 0)) # Clear first to prevent glitches
+                self._pixels.fill((0, 0, 0)) 
                 self._pixels.fill(rgb)
             except Exception: pass
 
     def set_idle(self): self._set_color(LED_IDLE_COLOR)
     def set_busy(self): self._set_color(LED_VERIFY_COLOR)
-    def set_error(self): self._set_color((255, 0, 0)) # RED for errors/rejections
+    def set_error(self): self._set_color((255, 0, 0)) 
     def set_off(self): self._set_color((0, 0, 0))
 
     def apply_mode(self, mode: str):
@@ -1247,7 +1271,15 @@ class Kiosk(QStackedWidget):
 
     def update_idle_indicator(self):
         if not hasattr(self, "idle_indicator"): return
-        self.idle_indicator.set_countdown(self.idle_timer.remainingTime() if self.idle_timer.remainingTime() >= 0 else IDLE_TIMEOUT_MS, IDLE_TIMEOUT_MS)
+        remaining = self.idle_timer.remainingTime()
+        if remaining < 0: remaining = IDLE_TIMEOUT_MS
+        
+        # Only show the countdown ring in the last 10 seconds!
+        if remaining <= 10000:
+            if self.idle_indicator.isHidden(): self.idle_indicator.show()
+            self.idle_indicator.set_countdown(remaining, 10000)
+        else:
+            if not self.idle_indicator.isHidden(): self.idle_indicator.hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
