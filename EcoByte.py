@@ -1269,7 +1269,7 @@ class HardwareWorker(QThread):
                             
                             while (time.monotonic() - drop_start) < gate_duration:
                                 # HW-201 goes LOW (0) when object is detected
-                                if GPIO.input(GPIO_IR) == GPIO.LOW:
+                                if GPIO.input(GPIO_IR) == GPIO.HIGH:
                                     bottle_fell = True
                                     # We don't break immediately so the servo has 
                                     # enough time to let the bottle fully clear.
