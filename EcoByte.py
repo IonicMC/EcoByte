@@ -1,35 +1,36 @@
 import requests
 
-# --- CONFIGURATION ---
-SEMAPHORE_API_KEY = "6ae5cec324c152ff42011d3aa598b26a"  # Your API key from the screenshot
-PHONE_NUMBER = "09694837544"                            # <-- REPLACE THIS with your real Globe/Smart/DITO number
-MESSAGE = "EcoByte Alert: ₱10 Load has been successfully credited to your number! Thank you for recycling."
+# --- YOUR ECOBYTE CREDENTIALS ---
+BOT_TOKEN = "8421998322:AAFlinuF5YnQXbxdzga27ntV8Db6KO4Ut1Q"
+CHAT_ID = "7122838385"
 
-def test_semaphore_sms():
-    print(f"Sending Web API request to Semaphore for {PHONE_NUMBER}...")
+MESSAGE = "🌿 EcoByte Alert: ₱10.00 Regular Load has been successfully credited! Thank you for recycling."
+
+def test_telegram_sms():
+    print("Sending request to Telegram Servers...")
     
-    url = "https://api.semaphore.co/api/v4/messages"
+    # The official Telegram API URL
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    
+    # The data we are sending
     payload = {
-        "apikey": SEMAPHORE_API_KEY,
-        "number": PHONE_NUMBER,
-        "message": MESSAGE
+        "chat_id": CHAT_ID,
+        "text": MESSAGE
     }
     
     try:
-        # Send the request to Semaphore
-        response = requests.post(url, data=payload, timeout=5)
+        response = requests.post(url, json=payload, timeout=5)
         
-        # Check if it was successful
         if response.status_code == 200:
-            print("\nSUCCESS! Semaphore accepted the request.")
-            print("Check your phone inbox!")
-            print(f"Semaphore Server Reply: {response.json()}")
+            print("\nSUCCESS! The message was sent.")
+            print("Check your Telegram app, your phone should have just buzzed!")
         else:
-            print(f"\nERROR: Semaphore rejected it. Code: {response.status_code}")
-            print(f"Reply: {response.text}")
+            print(f"\nERROR: Telegram rejected it. Code: {response.status_code}")
+            print(f"Details: {response.text}")
+            print("\nDid you remember to press 'Start' or message the bot first?")
             
     except requests.exceptions.RequestException as e:
-        print(f"\nNetwork Error: Could not reach Semaphore. Check Wi-Fi.\nDetails: {e}")
+        print(f"\nNetwork Error: {e}")
 
 if __name__ == "__main__":
-    test_semaphore_sms()
+    test_telegram_sms()
