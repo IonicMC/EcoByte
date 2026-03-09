@@ -81,11 +81,11 @@ GPIO_ECHO = 24
 GPIO_SERVO = 16
 GPIO_IR = 27  # BCM 27 is Physical Pin 13
 
-# Ultrasonic & State Machine Timers
+# Ultrasonic-only fallback mode
 ULTRA_MIN_CM = 2.0
 ULTRA_MAX_CM = 18.0
 ULTRA_TIMEOUT_S = 0.03
-VERIFY_SECONDS = 3.0      # Increased from 1.5 to give the AI time to see the bottle!
+VERIFY_SECONDS = 3.0      
 IR_DROP_TIMEOUT_S = 3.0   
 COOLDOWN_SECONDS = 2.0    
 POLL_MS = 60
@@ -129,7 +129,7 @@ ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 33  # Re-added the missing config to prevent crash!
+PREVIEW_INTERVAL_MS = 33  
 
 
 # ============================================================
@@ -813,6 +813,7 @@ class HardwareWorker(QThread):
         try:
             while self.running:
                 
+                # 1. State: Object must be fully removed 
                 if self._waiting_for_removal:
                     if self._object_present():
                         self._clear_start_time = time.monotonic() 
@@ -823,6 +824,7 @@ class HardwareWorker(QThread):
                     self.msleep(100)
                     continue
                 
+                # 2. State: Cooldown block
                 if self._in_cooldown:
                     time.sleep(COOLDOWN_SECONDS)
                     self._in_cooldown = False
@@ -830,6 +832,7 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("WAITING")
                     continue
 
+                # 3. Main Loop
                 ready = self._object_present()
 
                 if ready:
@@ -1254,12 +1257,17 @@ class Kiosk(QStackedWidget):
         self.redeem.scanned_text.connect(self.on_redeem_scanned)
 
         self.idle_timer = QTimer(self); self.idle_timer.timeout.connect(self.go_main)
-        self.idle_indicator = IdleRing(self); self.idle_indicator.raise_()
+        self.idle_indicator = IdleRing(self)
+        
         self._idle_visual_timer = QTimer(self); self._idle_visual_timer.timeout.connect(self.update_idle_indicator); self._idle_visual_timer.start(33) 
         self.reset_idle()
 
         self._filter = IdleEventFilter(); self._filter.activity.connect(self.reset_idle)
         QApplication.instance().installEventFilter(self._filter)
+
+    def reset_idle(self):
+        self.idle_timer.start(IDLE_TIMEOUT_MS)
+        self.update_idle_indicator()
 
     def update_idle_indicator(self):
         if not hasattr(self, "idle_indicator"): return
