@@ -33,6 +33,12 @@ except Exception:
     cv2 = None
     np = None
 
+if cv2 is not None:
+    try:
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, pyqtProperty, QPropertyAnimation,
     QEasingCurve, QSize, QObject, QEvent
@@ -120,12 +126,12 @@ SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
 # Background animation
-WATER_FPS_MS = 66
+WATER_FPS_MS = 90
 WAVE_SPEED = 0.092
 WAVE_OPACITY = 0.18
 
 # Falling bottles
-BOTTLE_COUNT = 5
+BOTTLE_COUNT = 3
 BOTTLE_ALPHA = 44
 BOTTLE_SPEED_MIN = 0.75
 BOTTLE_SPEED_MAX = 1.9
@@ -145,7 +151,7 @@ ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
 ONNX_VERIFY_RATIO = 0.10
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 180
+PREVIEW_INTERVAL_MS = 220
 
 
 # ============================================================
@@ -419,7 +425,15 @@ class WaterBackground(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(WATER_FPS_MS)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._timer.start(WATER_FPS_MS)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
 
     def _tick(self):
         self._phase += WAVE_SPEED
@@ -861,6 +875,8 @@ class ONNXBottleVerifier:
         self._last_qimage = None
         self._last_detection = False
         self._last_conf = 0.0
+        self._last_preview_infer_ts = 0.0
+        self._preview_infer_interval_s = 0.25
 
         if not self.enabled:
             return
@@ -975,8 +991,13 @@ class ONNXBottleVerifier:
     def get_preview_qimage(self):
         if not self.available or self._net is None:
             return None
-        with self._lock:
+        if not self._lock.acquire(blocking=False):
+            return self._last_qimage
+        try:
             if not self._ensure_camera():
+                return self._last_qimage
+            now = time.monotonic()
+            if self._last_qimage is not None and (now - self._last_preview_infer_ts) < self._preview_infer_interval_s:
                 return self._last_qimage
             ok, frame = self._cap.read()
             if not ok or frame is None:
@@ -986,7 +1007,10 @@ class ONNXBottleVerifier:
             self._store_qimage(annotated)
             self._last_detection = detected
             self._last_conf = best_conf
+            self._last_preview_infer_ts = now
             return self._last_qimage
+        finally:
+            self._lock.release()
 
     def quick_detect(self) -> bool:
         if not self.available or self._net is None:
@@ -1241,8 +1265,16 @@ class BouncingArrow(QWidget):
         self._dir = 1
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(45)
         self.setFixedHeight(260)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._timer.isActive():
+            self._timer.start(60)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._timer.stop()
 
     def _tick(self):
         self._offset += 0.8 * self._dir
@@ -1525,12 +1557,22 @@ class DepositScreen(WaterBackground):
 
         self._preview_timer = QTimer(self)
         self._preview_timer.timeout.connect(self._update_preview)
-        self._preview_timer.start(PREVIEW_INTERVAL_MS)
 
         self._corner = SecretExitCorner(self.kiosk.exit_app, self)
         self._corner.move(0, 0)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._preview_timer.isActive():
+            self._preview_timer.start(PREVIEW_INTERVAL_MS)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._preview_timer.stop()
+
     def _update_preview(self):
+        if not self.isVisible():
+            return
         if self.verifier is None or not getattr(self.verifier, 'available', False):
             return
         qimg = self.verifier.get_preview_qimage()
@@ -1901,7 +1943,7 @@ class Kiosk(QStackedWidget):
 
         self._idle_visual_timer = QTimer(self)
         self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
-        self._idle_visual_timer.start(100)
+        self._idle_visual_timer.start(150)
 
         self.reset_idle()
 
