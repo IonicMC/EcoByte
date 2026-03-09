@@ -2054,7 +2054,7 @@ class Kiosk(QStackedWidget):
             self.go_main()
             return
 
-        token = "ECO" + uuid.uuid4().hex[:12]
+        token_id = "ECO" + uuid.uuid4().hex[:12]
         payload = {
             "type": "deposit",
             "token": token_id,
