@@ -1,14 +1,10 @@
+from ultralytics import YOLO
 import cv2
-import numpy as np
-import onnxruntime as ort
 
-# Load ONNX model
-session = ort.InferenceSession("best.onnx")
+# Load your ONNX model
+model = YOLO("best.onnx")
 
-# Get input name
-input_name = session.get_inputs()[0].name
-
-# Start camera
+# Open camera
 cap = cv2.VideoCapture(0)
 
 while True:
@@ -16,22 +12,16 @@ while True:
     if not ret:
         break
 
-    # Resize to model input size
-    img = cv2.resize(frame, (640, 640))
-    img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = np.expand_dims(img, axis=0)
+    # Run detection
+    results = model(frame)
 
-    # Run inference
-    outputs = session.run(None, {input_name: img})
+    # Draw detections
+    annotated_frame = results[0].plot()
 
-    # Just print detections to confirm model works
-    print(outputs[0].shape)
+    # Show result
+    cv2.imshow("YOLOv8 Test", annotated_frame)
 
-    # Show camera feed
-    cv2.imshow("YOLOv8 Test", frame)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
 cap.release()
