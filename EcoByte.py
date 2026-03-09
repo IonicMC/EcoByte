@@ -35,7 +35,7 @@ except Exception:
 
 if cv2 is not None:
     try:
-        cv2.setNumThreads(1)
+        cv2.setNumThreads(4)
     except Exception:
         pass
 
@@ -144,7 +144,7 @@ FIREBASE_TIMEOUT_S = 3.5
 USE_ONNX_VERIFIER = True
 ONNX_MODEL_PATH = "best.onnx"
 CAMERA_INDEX = 0
-ONNX_INPUT_SIZE = 320
+ONNX_INPUT_SIZE = 640
 ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
