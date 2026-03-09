@@ -141,6 +141,7 @@ CAMERA_INDEX = 0
 ONNX_INPUT_SIZE = 640
 ONNX_CONF_THRESHOLD = 0.45
 ONNX_OPEN_TIMEOUT_S = 2.0
+CAMERA_MAIN_SENSOR = True
 
 
 # ============================================================
@@ -848,26 +849,23 @@ def make_card() -> QWidget:
 class ONNXBottleVerifier:
     """YOLOv8 ONNX bottle verifier using OpenCV DNN.
 
-    Behavior:
-      - Runs for about 1 second when verification is requested
-      - Requires repeated detections across the sampled frames
-      - Returns True only when a bottle is detected consistently enough
+    - sample_once(): quick single-frame bottle check
+    - verify_once(): 1-second repeated verification before servo opens
+    - keeps the camera open between checks for faster response
     """
     def __init__(self, base_dir: str):
         self.enabled = bool(USE_ONNX_VERIFIER)
         self.available = False
         self.reason = "disabled"
         self._net = None
+        self._cap = None
         self._lock = threading.Lock()
         self.model_path = os.path.join(base_dir, ONNX_MODEL_PATH)
-
-        # Camera is opened only during verify_once to keep the app simple/stable.
         self.camera_index = CAMERA_INDEX
 
-        # 1-second verification settings
         self.verify_seconds = 1.0
-        self.required_ratio = 0.40   # at least 40% of sampled frames must detect bottle
-        self.min_positive_frames = 3 # also require a minimum number of positive frames
+        self.required_ratio = 0.40
+        self.min_positive_frames = 3
 
         if not self.enabled:
             return
@@ -887,13 +885,33 @@ class ONNXBottleVerifier:
             self.reason = str(e)
             print(f"[ONNX] failed to load: {e}")
 
+    def _ensure_camera(self):
+        if self._cap is not None and self._cap.isOpened():
+            return True
+        try:
+            self._cap = cv2.VideoCapture(self.camera_index)
+            start = time.monotonic()
+            while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
+                time.sleep(0.05)
+            return self._cap.isOpened()
+        except Exception as e:
+            print(f"[ONNX] camera open error: {e}")
+            self._cap = None
+            return False
+
+    def release(self):
+        try:
+            if self._cap is not None:
+                self._cap.release()
+        except Exception:
+            pass
+        self._cap = None
+
     def _detect_bottle(self, frame):
-        """Return (detected: bool, best_score: float) for one frame."""
         if self._net is None:
             return False, 0.0
 
         h, w = frame.shape[:2]
-
         blob = cv2.dnn.blobFromImage(
             frame,
             scalefactor=1 / 255.0,
@@ -904,10 +922,7 @@ class ONNXBottleVerifier:
 
         self._net.setInput(blob)
         outputs = self._net.forward()
-
         outputs = np.squeeze(outputs)
-
-        # YOLOv8 ONNX output commonly comes out as [84, 8400] or [5, 8400] etc.
         if outputs.ndim == 2:
             outputs = outputs.T
 
@@ -917,10 +932,8 @@ class ONNXBottleVerifier:
         for row in outputs:
             if len(row) < 5:
                 continue
-
             x, y, bw, bh = row[0:4]
             score = float(row[4])
-
             if score < ONNX_CONF_THRESHOLD:
                 continue
 
@@ -936,7 +949,6 @@ class ONNXBottleVerifier:
             return False, 0.0
 
         indices = cv2.dnn.NMSBoxes(boxes, scores, ONNX_CONF_THRESHOLD, 0.4)
-
         if indices is None or len(indices) == 0:
             return False, max(scores) if scores else 0.0
 
@@ -947,62 +959,56 @@ class ONNXBottleVerifier:
 
         return True, best_score
 
+    def sample_once(self) -> bool:
+        if not self.enabled or not self.available or self._net is None:
+            return False
+
+        with self._lock:
+            if not self._ensure_camera():
+                print("[ONNX] camera failed to open")
+                return False
+            ret, frame = self._cap.read()
+            if not ret or frame is None:
+                return False
+            detected, conf = self._detect_bottle(frame)
+            if detected:
+                print(f"[ONNX] quick detect conf={conf:.3f}")
+            return detected
+
     def verify_once(self) -> bool:
-        # If verifier is disabled/unavailable, allow the app to keep working.
         if not self.enabled or not self.available or self._net is None:
             return True
 
         with self._lock:
-            cap = None
-            try:
-                cap = cv2.VideoCapture(self.camera_index)
-                start_open = time.monotonic()
-                while not cap.isOpened() and (time.monotonic() - start_open) < ONNX_OPEN_TIMEOUT_S:
-                    time.sleep(0.05)
+            if not self._ensure_camera():
+                print("[ONNX] camera failed to open; rejecting")
+                return False
 
-                if not cap.isOpened():
-                    print("[ONNX] camera failed to open; allowing ultrasonic fallback")
-                    return True
+            start = time.monotonic()
+            frames = 0
+            positives = 0
+            best_seen = 0.0
 
-                start = time.monotonic()
-                frames = 0
-                positives = 0
-                best_seen = 0.0
-
-                while (time.monotonic() - start) < self.verify_seconds:
-                    ret, frame = cap.read()
-                    if not ret or frame is None:
-                        time.sleep(0.01)
-                        continue
-
-                    frames += 1
-                    detected, best_score = self._detect_bottle(frame)
-                    best_seen = max(best_seen, best_score)
-
-                    if detected:
-                        positives += 1
-
-                    # small sleep keeps CPU load more reasonable
+            while (time.monotonic() - start) < self.verify_seconds:
+                ret, frame = self._cap.read()
+                if not ret or frame is None:
                     time.sleep(0.01)
+                    continue
 
-                if frames == 0:
-                    print("[ONNX] no frames received; rejecting")
-                    return False
+                frames += 1
+                detected, best_score = self._detect_bottle(frame)
+                best_seen = max(best_seen, best_score)
+                if detected:
+                    positives += 1
+                time.sleep(0.01)
 
-                ratio = positives / frames
-                print(f"[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best_seen:.3f}")
+            if frames == 0:
+                print("[ONNX] no frames received; rejecting")
+                return False
 
-                return positives >= self.min_positive_frames and ratio >= self.required_ratio
-
-            except Exception as e:
-                print(f"[ONNX] verify failed: {e}; allowing ultrasonic fallback")
-                return True
-            finally:
-                try:
-                    if cap is not None:
-                        cap.release()
-                except Exception:
-                    pass
+            ratio = positives / frames
+            print(f"[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best_seen:.3f}")
+            return positives >= self.min_positive_frames and ratio >= self.required_ratio
 
 # ============================================================
 # Hardware Worker
@@ -1013,9 +1019,11 @@ class HardwareWorker(QThread):
     dropped = pyqtSignal()
     wake_requested = pyqtSignal()
 
-    def __init__(self, verifier_fn=None):
+    def __init__(self, verifier_fn=None, quick_check_fn=None, camera_main=False):
         super().__init__()
         self.verifier_fn = verifier_fn
+        self.quick_check_fn = quick_check_fn
+        self.camera_main = camera_main
         self.running = True
         self.session_enabled = False
         self._verifying = False
@@ -1104,7 +1112,14 @@ class HardwareWorker(QThread):
 
         try:
             while self.running:
-                ready = self._object_present()
+                if self.camera_main and self.quick_check_fn is not None:
+                    try:
+                        ready = bool(self.quick_check_fn())
+                    except Exception as e:
+                        print(f"[VERIFY] quick check error: {e}")
+                        ready = self._object_present()
+                else:
+                    ready = self._object_present()
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -1735,9 +1750,11 @@ class ThemedConfirmDialog(QDialog):
 # ============================================================
 
 class Kiosk(QStackedWidget):
-    def __init__(self, verifier_fn=None):
+    def __init__(self, verifier_fn=None, quick_check_fn=None, camera_main=False):
         super().__init__()
         self.verifier_fn = verifier_fn
+        self.quick_check_fn = quick_check_fn
+        self.camera_main = camera_main
 
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -1784,7 +1801,11 @@ class Kiosk(QStackedWidget):
         self.led = LEDController(self)
         self.led.set_idle()  # always green on startup/main screen
 
-        self.worker = HardwareWorker(verifier_fn=self.verifier.verify_once if self.verifier.available else None)
+        self.worker = HardwareWorker(
+            verifier_fn=self.verifier.verify_once if self.verifier.available else None,
+            quick_check_fn=self.verifier.sample_once if self.verifier.available else None,
+            camera_main=CAMERA_MAIN_SENSOR and self.verifier.available
+        )
         self.worker.ui_mode.connect(self.deposit.set_mode)
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
@@ -1964,6 +1985,10 @@ class Kiosk(QStackedWidget):
             return
 
     def exit_app(self):
+        try:
+            self.verifier.release()
+        except Exception:
+            pass
         try:
             self.led.set_off()
         except Exception:
