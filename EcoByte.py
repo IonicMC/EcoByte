@@ -97,7 +97,7 @@ CLEAR_BOTH_TIMEOUT_S = 2.0
 
 SERVO_CLOSED_US = 500
 SERVO_OPEN_US = 1200
-GATE_OPEN_MS = 900
+# GATE_OPEN_MS is removed, replaced by dynamic IR wait threshold below
 
 POINTS_PER_BOTTLE = 5
 
@@ -113,16 +113,16 @@ BTN_H = 124
 SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
-# Background animation (Capped at 30fps so the Pi can breathe, but step size increased)
-WATER_FPS_MS = 33
-WAVE_SPEED = 0.08
+# Background animation (60fps timers with relative speeds)
+WATER_FPS_MS = 16
+WAVE_SPEED = 0.04
 WAVE_OPACITY = 0.18
 
 # Falling bottles
 BOTTLE_COUNT = 10
 BOTTLE_ALPHA = 44
-BOTTLE_SPEED_MIN = 3.5  # Faster step size to compensate for 30fps cap
-BOTTLE_SPEED_MAX = 8.5
+BOTTLE_SPEED_MIN = 1.75  
+BOTTLE_SPEED_MAX = 4.25
 
 # Firebase
 FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -903,7 +903,7 @@ class ONNXBottleVerifier:
 
 
 # ============================================================
-# Hardware Worker (Now with Integrated IR Anti-Cheat)
+# Hardware Worker (Dynamic IR Threshold Logic)
 # ============================================================
 
 class HardwareWorker(QThread):
@@ -1042,28 +1042,33 @@ class HardwareWorker(QThread):
                         else:
                             self.ui_mode.emit("DROPPING")
                             
-                            # === DROP AND VERIFY SEQUENCE ===
+                            # === DYNAMIC DROP AND VERIFY SEQUENCE ===
                             servo_pulse(SERVO_OPEN_US)
                             
                             drop_start = time.monotonic()
                             bottle_fell = False
-                            gate_duration = GATE_OPEN_MS / 1000.0
                             
-                            # Check IR continuously while gate is open
-                            while (time.monotonic() - drop_start) < gate_duration:
+                            # Wait UP TO 1.5 seconds for the bottle to drop and trigger IR
+                            max_wait_time = 1.5  
+                            
+                            while (time.monotonic() - drop_start) < max_wait_time:
                                 if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
+                                    # Give it a tiny fraction of a second to fully clear the chute
+                                    time.sleep(0.3) 
+                                    break # Exit the wait early!
                                 time.sleep(0.01)
                                 
+                            # Close the gate regardless of what happened
                             servo_pulse(SERVO_CLOSED_US, hold=True)
                             
-                            # Reward points only if it triggered
+                            # Reward points only if it successfully fell
                             if bottle_fell:
                                 self._waiting_clear = True
                                 self._clear_wait_start = time.monotonic()
                                 self.dropped.emit()
                             else:
-                                print("[ANTI-CHEAT] Bottle pulled back! No points awarded.")
+                                print("[ANTI-CHEAT] Bottle pulled back or timed out! No points awarded.")
                                 self._latched = False
                                 self.ui_mode.emit("WAITING")
                 else:
@@ -1100,14 +1105,14 @@ class BouncingArrow(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if not self._timer.isActive():
-            self._timer.start(33) 
+            self._timer.start(16) 
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self._timer.stop()
 
     def _tick(self):
-        self._offset += 1.8 * self._dir 
+        self._offset += 0.9 * self._dir 
         if self._offset > 24: self._dir = -1
         elif self._offset < -8: self._dir = 1
         self.update()
@@ -1639,7 +1644,7 @@ class Kiosk(QStackedWidget):
 
         self._idle_visual_timer = QTimer(self)
         self._idle_visual_timer.timeout.connect(self.update_idle_indicator)
-        self._idle_visual_timer.start(33) 
+        self._idle_visual_timer.start(16) 
 
         self.reset_idle()
 
