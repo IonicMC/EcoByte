@@ -120,12 +120,12 @@ SMALL_BTN_W = 320
 SMALL_BTN_H = 98
 
 # Background animation
-WATER_FPS_MS = 50
+WATER_FPS_MS = 66
 WAVE_SPEED = 0.092
 WAVE_OPACITY = 0.18
 
 # Falling bottles
-BOTTLE_COUNT = 8
+BOTTLE_COUNT = 5
 BOTTLE_ALPHA = 44
 BOTTLE_SPEED_MIN = 0.75
 BOTTLE_SPEED_MAX = 1.9
@@ -139,13 +139,13 @@ USE_ONNX_VERIFIER = True
 ONNX_MODEL_PATH = "best.onnx"
 CAMERA_INDEX = 0
 ONNX_INPUT_SIZE = 640
-ONNX_CONF_THRESHOLD = 0.40
+ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_VERIFY_SECONDS = 1.0
-ONNX_VERIFY_RATIO = 0.18
-ONNX_MIN_POSITIVES = 3
-PREVIEW_INTERVAL_MS = 140
+ONNX_VERIFY_RATIO = 0.10
+ONNX_MIN_POSITIVES = 2
+PREVIEW_INTERVAL_MS = 180
 
 
 # ============================================================
@@ -859,6 +859,8 @@ class ONNXBottleVerifier:
         self._cap = None
         self._lock = threading.RLock()
         self._last_qimage = None
+        self._last_detection = False
+        self._last_conf = 0.0
 
         if not self.enabled:
             return
@@ -883,6 +885,10 @@ class ONNXBottleVerifier:
             return True
         try:
             self._cap = cv2.VideoCapture(CAMERA_INDEX)
+            try:
+                self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
             start = time.monotonic()
             while not self._cap.isOpened() and (time.monotonic() - start) < ONNX_OPEN_TIMEOUT_S:
                 time.sleep(0.05)
@@ -900,7 +906,7 @@ class ONNXBottleVerifier:
                 pass
             self._cap = None
 
-    def _detect_and_annotate(self, frame):
+    def _run_model(self, frame):
         h, w = frame.shape[:2]
         blob = cv2.dnn.blobFromImage(
             frame,
@@ -935,27 +941,30 @@ class ONNXBottleVerifier:
             width = int(bw * w / ONNX_INPUT_SIZE)
             height = int(bh * h / ONNX_INPUT_SIZE)
 
-            left = max(0, left)
-            top = max(0, top)
-            width = max(1, min(width, w - left if left < w else 1))
-            height = max(1, min(height, h - top if top < h else 1))
+            left = max(0, min(left, max(0, w - 2)))
+            top = max(0, min(top, max(0, h - 2)))
+            width = max(1, min(width, w - left))
+            height = max(1, min(height, h - top))
 
             boxes.append([left, top, width, height])
             scores.append(score)
 
-        detected = False
-        if len(boxes) > 0:
+        kept = []
+        if boxes:
             indices = cv2.dnn.NMSBoxes(boxes, scores, ONNX_CONF_THRESHOLD, ONNX_NMS_THRESHOLD)
-            if len(indices) > 0:
-                detected = True
-                for i in indices:
-                    i = i[0] if isinstance(i, (tuple, list, np.ndarray)) else i
-                    x, y, bw, bh = boxes[i]
-                    cv2.rectangle(frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
-                    cv2.putText(frame, f"Bottle {scores[i]:.2f}", (x, max(28, y - 10)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
+            for i in indices:
+                i = i[0] if isinstance(i, (tuple, list, np.ndarray)) else i
+                kept.append((boxes[i], scores[i]))
 
-        return frame, detected, best_conf
+        detected = len(kept) > 0
+        return kept, detected, best_conf
+
+    def _annotate(self, frame, kept):
+        for (x, y, bw, bh), score in kept:
+            cv2.rectangle(frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
+            cv2.putText(frame, f"Bottle {score:.2f}", (x, max(28, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
+        return frame
 
     def _store_qimage(self, frame_bgr):
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -972,9 +981,28 @@ class ONNXBottleVerifier:
             ok, frame = self._cap.read()
             if not ok or frame is None:
                 return self._last_qimage
-            annotated, _, _ = self._detect_and_annotate(frame)
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
             self._store_qimage(annotated)
+            self._last_detection = detected
+            self._last_conf = best_conf
             return self._last_qimage
+
+    def quick_detect(self) -> bool:
+        if not self.available or self._net is None:
+            return False
+        with self._lock:
+            if not self._ensure_camera():
+                return False
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return False
+            kept, detected, best_conf = self._run_model(frame)
+            annotated = self._annotate(frame, kept)
+            self._store_qimage(annotated)
+            self._last_detection = detected
+            self._last_conf = best_conf
+            return detected
 
     def verify_once(self) -> bool:
         if not self.available or self._net is None:
@@ -982,35 +1010,43 @@ class ONNXBottleVerifier:
 
         with self._lock:
             if not self._ensure_camera():
-                print('[ONNX] camera failed to open; allowing ultrasonic fallback')
+                print('[ONNX] camera failed to open; allowing fallback')
                 return True
 
             start = time.monotonic()
             frames = 0
             positives = 0
             best = 0.0
+            consecutive = 0
+            best_consecutive = 0
 
             while (time.monotonic() - start) < ONNX_VERIFY_SECONDS:
                 ok, frame = self._cap.read()
                 if not ok or frame is None:
+                    time.sleep(0.01)
                     continue
-                annotated, detected, conf = self._detect_and_annotate(frame)
+                kept, detected, conf = self._run_model(frame)
+                annotated = self._annotate(frame, kept)
                 self._store_qimage(annotated)
                 frames += 1
+                best = max(best, conf)
                 if detected:
                     positives += 1
-                best = max(best, conf)
-                time.sleep(0.02)
+                    consecutive += 1
+                    best_consecutive = max(best_consecutive, consecutive)
+                else:
+                    consecutive = 0
+                time.sleep(0.015)
 
             if frames == 0:
-                print('[ONNX] no frames during verify; allowing ultrasonic fallback')
+                print('[ONNX] no frames during verify; allowing fallback')
                 return True
 
             ratio = positives / frames
-            needed = max(ONNX_MIN_POSITIVES, int(math.ceil(frames * ONNX_VERIFY_RATIO)))
-            accepted = positives >= needed or (best >= 0.85 and positives >= 2)
-            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} needed={needed} accepted={accepted}')
+            accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
+            print(f'[ONNX] verify positives={positives}/{frames} ratio={ratio:.2f} best={best:.2f} streak={best_consecutive} accepted={accepted}')
             return accepted
+
 
 # ============================================================
 # Hardware Worker
@@ -1021,9 +1057,9 @@ class HardwareWorker(QThread):
     dropped = pyqtSignal()
     wake_requested = pyqtSignal()
 
-    def __init__(self, verifier_fn=None):
+    def __init__(self, verifier=None):
         super().__init__()
-        self.verifier_fn = verifier_fn
+        self.verifier = verifier
         self.running = True
         self.session_enabled = False
         self._verifying = False
@@ -1048,7 +1084,6 @@ class HardwareWorker(QThread):
             self.ui_mode.emit("WAITING")
 
     def _distance_cm(self):
-        """Read HC-SR04 distance. Returns None on timeout/noisy read."""
         try:
             GPIO.output(GPIO_TRIG, False)
             time.sleep(0.000002)
@@ -1081,9 +1116,7 @@ class HardwareWorker(QThread):
             return False
         if not (ULTRA_MIN_CM <= d1 <= ULTRA_MAX_CM):
             return False
-
-        # Small second check to reduce random spikes.
-        time.sleep(0.01)
+        time.sleep(0.005)
         d2 = self._distance_cm()
         if d2 is None:
             return False
@@ -1101,18 +1134,27 @@ class HardwareWorker(QThread):
         if not self._pi.connected:
             raise RuntimeError("pigpio daemon not running. Start it with: sudo pigpiod")
 
-        def servo_pulse(pulse_us, settle_s=0.35, hold=False):
+        def servo_pulse(pulse_us, settle_s=0.28, hold=False):
             self._pi.set_servo_pulsewidth(GPIO_SERVO, int(pulse_us))
             time.sleep(settle_s)
             if not hold:
                 self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
 
-        # Always hold the gate flat/closed while idle
         servo_pulse(SERVO_CLOSED_US, hold=True)
 
         try:
             while self.running:
-                ready = self._object_present()
+                ultrasonic_ready = self._object_present()
+                camera_ready = False
+
+                if self.verifier is not None and getattr(self.verifier, 'available', False):
+                    try:
+                        camera_ready = self.verifier.quick_detect()
+                    except Exception as e:
+                        print(f"[VERIFY] quick detect error: {e}")
+                        camera_ready = False
+
+                ready = camera_ready or ultrasonic_ready
 
                 if not self.session_enabled:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
@@ -1126,20 +1168,13 @@ class HardwareWorker(QThread):
 
                 if self._waiting_clear:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, int(SERVO_CLOSED_US))
-
-                    if not ready:
-                        self._waiting_clear = False
-                        self._latched = False
-                        self._clear_wait_start = None
-                        self.ui_mode.emit("WAITING")
-                    elif self._clear_wait_start is not None and (time.monotonic() - self._clear_wait_start) >= CLEAR_BOTH_TIMEOUT_S:
+                    if (not ready) or (self._clear_wait_start is not None and (time.monotonic() - self._clear_wait_start) >= CLEAR_BOTH_TIMEOUT_S):
                         self._waiting_clear = False
                         self._latched = False
                         self._clear_wait_start = None
                         self.ui_mode.emit("WAITING")
                     else:
                         self.ui_mode.emit("DROPPING")
-
                     self.msleep(POLL_MS)
                     continue
 
@@ -1153,9 +1188,9 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("VERIFYING")
                     if (time.monotonic() - self._verify_start) >= VERIFY_SECONDS:
                         allow_drop = True
-                        if self.verifier_fn is not None:
+                        if self.verifier is not None and getattr(self.verifier, 'available', False):
                             try:
-                                allow_drop = bool(self.verifier_fn())
+                                allow_drop = bool(self.verifier.verify_once())
                             except Exception as e:
                                 print(f"[VERIFY] verifier callback error: {e}")
                                 allow_drop = True
@@ -1167,11 +1202,9 @@ class HardwareWorker(QThread):
                             self.ui_mode.emit("WAITING")
                         else:
                             self.ui_mode.emit("DROPPING")
-
                             servo_pulse(SERVO_OPEN_US)
                             time.sleep(GATE_OPEN_MS / 1000.0)
                             servo_pulse(SERVO_CLOSED_US, hold=True)
-
                             self._waiting_clear = True
                             self._clear_wait_start = time.monotonic()
                             self.dropped.emit()
@@ -1182,6 +1215,11 @@ class HardwareWorker(QThread):
                 self.msleep(POLL_MS)
 
         finally:
+            try:
+                if self.verifier is not None:
+                    self.verifier.release()
+            except Exception:
+                pass
             try:
                 if self._pi is not None:
                     self._pi.set_servo_pulsewidth(GPIO_SERVO, 0)
@@ -1203,11 +1241,11 @@ class BouncingArrow(QWidget):
         self._dir = 1
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)
+        self._timer.start(45)
         self.setFixedHeight(260)
 
     def _tick(self):
-        self._offset += 1.2 * self._dir
+        self._offset += 0.8 * self._dir
         if self._offset > 24:
             self._dir = -1
         elif self._offset < -8:
@@ -1846,7 +1884,7 @@ class Kiosk(QStackedWidget):
         self.led = LEDController(self)
         self.led.set_idle()  # always green on startup/main screen
 
-        self.worker = HardwareWorker(verifier_fn=self.verifier.verify_once if self.verifier.available else None)
+        self.worker = HardwareWorker(verifier=self.verifier if self.verifier.available else None)
         self.worker.ui_mode.connect(self.deposit.set_mode)
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
