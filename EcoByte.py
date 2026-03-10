@@ -1439,10 +1439,15 @@ class Kiosk(QStackedWidget):
     def _send_telegram_alert(self, amount, number):
         # Fire the Telegram Webhook in the background so it doesn't freeze the screen
         def worker():
+            # Treat the 'number' from the MIT App QR as the Telegram Chat ID
+            target_chat_id = str(number).strip()
+            
             msg = f"🌿 EcoByte Alert: ₱{amount}.00 Regular Load has been successfully credited to {number}! Thank you for recycling."
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            
             try:
-                requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
+                # Replace the hardcoded TELEGRAM_CHAT_ID with the dynamic target_chat_id
+                requests.post(url, json={"chat_id": target_chat_id, "text": msg}, timeout=5)
             except Exception as e:
                 print(f"Telegram Error: {e}")
                 
