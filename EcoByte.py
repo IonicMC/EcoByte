@@ -84,8 +84,8 @@ GPIO_SERVO = 16
 GPIO_IR = 27  # BCM 27 is Physical Pin 13
 
 # Ultrasonic-only fallback mode
-ULTRA_MIN_CM = 3.0
-ULTRA_MAX_CM = 15.0
+ULTRA_MIN_CM = 4.0
+ULTRA_MAX_CM = 7.0
 ULTRA_TIMEOUT_S = 0.03
 VERIFY_SECONDS = 3.0      
 IR_DROP_TIMEOUT_S = 3.0   
@@ -903,7 +903,7 @@ class HardwareWorker(QThread):
                             bottle_fell = False
                             
                             while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
-                                if GPIO.input(GPIO_IR) == GPIO.LOW: 
+                                if GPIO.input(GPIO_IR) == GPIO.HIGH: 
                                     bottle_fell = True
                                     time.sleep(0.3) 
                                     break 
