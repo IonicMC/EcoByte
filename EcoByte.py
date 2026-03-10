@@ -84,8 +84,8 @@ GPIO_SERVO = 16
 GPIO_IR = 27  # BCM 27 is Physical Pin 13
 
 # Ultrasonic-only fallback mode
-ULTRA_MIN_CM = 2.0
-ULTRA_MAX_CM = 18.0
+ULTRA_MIN_CM = 3.0
+ULTRA_MAX_CM = 15.0
 ULTRA_TIMEOUT_S = 0.03
 VERIFY_SECONDS = 3.0      
 IR_DROP_TIMEOUT_S = 3.0   
@@ -119,7 +119,7 @@ BOTTLE_SPEED_MIN = 3.5
 BOTTLE_SPEED_MAX = 8.5
 
 # Firebase
-FIREBASE_URL = "https://ecobyte-firebase-default-rtdb.asia-southeast1.firebasedatabase.app"
+FIREBASE_URL = "https://ecobyte-us-default-rtdb.firebaseio.com/"
 FIREBASE_TIMEOUT_S = 3.5
 
 # ONNX bottle verifier
