@@ -855,7 +855,12 @@ class HardwareWorker(QThread):
                     self.ui_mode.emit("WAITING")
                     continue
 
-                ready = self._object_present(strict=True)
+                # --- NEW: SENSOR LOCK LOGIC ---
+                # Stop ultrasonic pinging completely while we verify and drop
+                if not self._verifying and not self._latched:
+                    ready = self._object_present(strict=True)
+                else:
+                    ready = True # Force true to stay in sequence, ultrasonic is disabled
 
                 if ready:
                     now = time.monotonic()
@@ -903,11 +908,11 @@ class HardwareWorker(QThread):
                             bottle_fell = False
                             
                             while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
-                                # Changed back to GPIO.LOW per your request
+                                # FAST POLLING 10ms for instant reaction
                                 if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
                                     
-                                    # --- NEW: IR DEBOUNCE TIMER ---
+                                    # IR DEBOUNCE TIMER
                                     # 1. Wait until the bottle physically leaves the IR beam
                                     clear_time = time.monotonic()
                                     while GPIO.input(GPIO_IR) == GPIO.LOW and (time.monotonic() - clear_time) < 1.5:
@@ -1272,6 +1277,7 @@ class Kiosk(QStackedWidget):
         self.setCurrentWidget(self.main)
 
         self.session_bottles = 0
+        self.used_redeem_tokens = set() # NEW: Keeps track of used phone QRs for security
         self.led = LEDController(self)
         self.led.set_idle()
 
@@ -1380,12 +1386,23 @@ class Kiosk(QStackedWidget):
         self.reset_idle(); self.snd.tap()
         self.redeem.status.setText("Reading App QR..."); self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
         
+        # --- NEW: ANTI-REUSE SECURITY ---
+        if scanned in self.used_redeem_tokens:
+            self.redeem.set_scanned_bad()
+            self.redeem.status.setText("ALREADY CLAIMED X")
+            QTimer.singleShot(2200, self.go_main)
+            return
+        
         try:
             # Parse the JSON from the MIT App's QR Code
             data = json.loads(scanned)
             if data.get("type") == "redeem":
                 amount = data.get("amount", 0)
                 number = data.get("number", "Unknown Number")
+                
+                # Lock this exact QR code string so it can't be used again
+                self.used_redeem_tokens.add(scanned)
+                
                 # Start the Hollywood UI Sequence
                 self._process_simulated_load(amount, number)
                 return
