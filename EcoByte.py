@@ -72,7 +72,7 @@ prepare_audio_env()
 # ============================================================
 # CONFIG & CREDENTIALS
 # ============================================================
-TELEGRAM_TOKEN = "8421998322:AAFlinuF5YnQXbxdzga27ntV8Db6KO4Ut1Q"
+TELEGRAM_TOKEN = "8629575185:AAFzG70VkRfiYPbZmeJ6IYP6EzL20uuS31k"
 TELEGRAM_CHAT_ID = "7122838385"
 
 IDLE_TIMEOUT_MS = 30000
@@ -903,9 +903,18 @@ class HardwareWorker(QThread):
                             bottle_fell = False
                             
                             while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
-                                if GPIO.input(GPIO_IR) == GPIO.HIGH: 
+                                # Changed back to GPIO.LOW per your request
+                                if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
-                                    time.sleep(0.3) 
+                                    
+                                    # --- NEW: IR DEBOUNCE TIMER ---
+                                    # 1. Wait until the bottle physically leaves the IR beam
+                                    clear_time = time.monotonic()
+                                    while GPIO.input(GPIO_IR) == GPIO.LOW and (time.monotonic() - clear_time) < 1.5:
+                                        time.sleep(0.05)
+                                        
+                                    # 2. Add an extra hard pause so reflections don't double-trigger
+                                    time.sleep(0.8) 
                                     break 
                                 time.sleep(0.01)
                                 
