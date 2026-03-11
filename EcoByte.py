@@ -1,5 +1,5 @@
 import os
-# Force X11 on Pi
+
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 os.environ["QT_QPA_PLATFORMTHEME"] = ""
 os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.qpa.*=false"
@@ -15,13 +15,11 @@ import json
 import math
 import random
 import threading
-
 import RPi.GPIO as GPIO
 import pigpio
 import qrcode
 import requests
 
-# Optional local ONNX bottle verification
 try:
     import cv2
     import numpy as np
@@ -30,7 +28,7 @@ except Exception:
 
 if cv2 is not None:
     try:
-        cv2.setNumThreads(4) # Using 4 cores for better Pi performance
+        cv2.setNumThreads(4)
     except Exception:
         pass
 
@@ -69,74 +67,56 @@ def prepare_audio_env():
 
 prepare_audio_env()
 
-# ============================================================
-# CONFIG & CREDENTIALS
-# ============================================================
 TELEGRAM_TOKEN = "8629575185:AAFzG70VkRfiYPbZmeJ6IYP6EzL20uuS31k"
 TELEGRAM_CHAT_ID = "7122838385"
-
 IDLE_TIMEOUT_MS = 30000
 
-# Hardware pins (BCM)
 GPIO_TRIG = 23
 GPIO_ECHO = 24
 GPIO_SERVO = 16
-GPIO_IR = 27  # BCM 27 is Physical Pin 13
+GPIO_IR = 27
 
-# Ultrasonic-only fallback mode
 ULTRA_MIN_CM = 4.0
 ULTRA_MAX_CM = 7.0
 ULTRA_TIMEOUT_S = 0.03
-VERIFY_SECONDS = 3.0      
-IR_DROP_TIMEOUT_S = 3.0   
-COOLDOWN_SECONDS = 2.0    
+VERIFY_SECONDS = 3.0
+IR_DROP_TIMEOUT_S = 3.0
 POLL_MS = 60
 
 SERVO_CLOSED_US = 500
 SERVO_OPEN_US = 1200
-
 POINTS_PER_BOTTLE = 5
 
-# WS2812B LED strip (D10 / SPI)
-LED_COUNT = 60          
-LED_BRIGHTNESS = 0.35   
-LED_IDLE_COLOR = (0, 255, 0)      
-LED_VERIFY_COLOR = (255, 0, 0)    
+LED_COUNT = 60
+LED_BRIGHTNESS = 0.35
+LED_IDLE_COLOR = (0, 255, 0)
+LED_VERIFY_COLOR = (255, 0, 0)
 
-# UI sizing
 BTN_W, BTN_H = 600, 124
 SMALL_BTN_W, SMALL_BTN_H = 320, 98
 
-# Background animation 
 WATER_FPS_MS = 33
 WAVE_SPEED = 0.08
 WAVE_OPACITY = 0.18
 
-# Falling bottles
 BOTTLE_COUNT = 10
 BOTTLE_ALPHA = 44
-BOTTLE_SPEED_MIN = 3.5  
+BOTTLE_SPEED_MIN = 3.5
 BOTTLE_SPEED_MAX = 8.5
 
-# Firebase
 FIREBASE_URL = "https://ecobyte-us-default-rtdb.firebaseio.com/"
 FIREBASE_TIMEOUT_S = 3.5
 
-# ONNX bottle verifier
 USE_ONNX_VERIFIER = True
 ONNX_MODEL_PATH = "best.onnx"
 CAMERA_INDEX = 0
-ONNX_INPUT_SIZE = 640  
+ONNX_INPUT_SIZE = 640
 ONNX_CONF_THRESHOLD = 0.38
 ONNX_OPEN_TIMEOUT_S = 2.0
 ONNX_NMS_THRESHOLD = 0.40
 ONNX_MIN_POSITIVES = 2
-PREVIEW_INTERVAL_MS = 33  
+PREVIEW_INTERVAL_MS = 33
 
-
-# ============================================================
-# Theme / Font
-# ============================================================
 FONT_FAMILY = "TT Hoves"
 
 def try_load_tt_hoves(base_dir: str):
@@ -159,9 +139,6 @@ def qr_pixmap_from_text(text: str, size_px: int = 560) -> QPixmap:
     w, h = img.size
     return QPixmap.fromImage(QImage(img.tobytes("raw", "RGB"), w, h, 3 * w, QImage.Format.Format_RGB888))
 
-# ============================================================
-# Sound Manager
-# ============================================================
 class SoundManager:
     def __init__(self, base_dir: str):
         self.ok = False
@@ -189,6 +166,8 @@ class SoundManager:
         self._snd_bottle = self._load(p("bottle.wav"))
         self._snd_success = self._load(p("success.wav"))
         self._snd_qr_show = self._load(p("qr_show.wav"))
+        self._snd_invalid = self._load(p("invalid.wav"))
+        self._snd_ready = self._load(p("ready.wav"))
         self._idle_playing = False
         self._lock = threading.Lock()
 
@@ -235,9 +214,16 @@ class SoundManager:
             self._snd_success.set_volume(1.0)
             self.ch_success.play(self._snd_success)
 
-# ============================================================
-# Firebase helper
-# ============================================================
+    def invalid(self):
+        if self.ok and self._snd_invalid and self.ch_fx:
+            self._snd_invalid.set_volume(1.0)
+            self.ch_fx.play(self._snd_invalid)
+
+    def ready(self):
+        if self.ok and self._snd_ready and self.ch_fx:
+            self._snd_ready.set_volume(1.0)
+            self.ch_fx.play(self._snd_ready)
+
 class FirebaseClient(QObject):
     log = pyqtSignal(str)
     ok = pyqtSignal(str)
@@ -270,9 +256,6 @@ class FirebaseClient(QObject):
             except Exception as e: self.ok.emit("redeem_invalid")
         threading.Thread(target=worker, daemon=True).start()
 
-# ============================================================
-# Animated Background: Waves + Falling Bottles
-# ============================================================
 class _BottleParticle:
     def __init__(self): self.reset(1080, 1920)
     def reset(self, width, height):
@@ -316,21 +299,17 @@ class WaterBackground(QWidget):
         body_w, body_h = 46 * s, 90 * s
         neck_w, neck_h, cap_h = 22 * s, 14 * s, 6 * s
         x0, y0 = cx - body_w / 2, cy - body_h / 2
-
         path = QPainterPath()
         path.addRoundedRect(float(x0), float(y0 + neck_h), float(body_w), float(body_h - neck_h), float(14*s), float(14*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0), float(neck_w), float(neck_h), float(8*s), float(8*s))
         path.addRoundedRect(float(cx - neck_w/2), float(y0 - cap_h), float(neck_w), float(cap_h), float(6*s), float(6*s))
-
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, alpha))
         p.drawPath(path)
-
         hx, hy, hw, hh = int(cx - body_w * 0.22), int(y0 + neck_h + body_h * 0.12), int(body_w * 0.14), int(body_h * 0.60)
         rr = int(max(2, 7 * s))
         p.setBrush(QColor(255, 255, 255, int(alpha * 0.55)))
         p.drawRoundedRect(hx, hy, hw, hh, rr, rr)
-
         pen = QPen(QColor(255, 255, 255, int(alpha * 0.55)), max(1, int(2 * s)))
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -343,21 +322,17 @@ class WaterBackground(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
-
         grad = QLinearGradient(0, 0, 0, h)
         grad.setColorAt(0.0, self._top)
         grad.setColorAt(1.0, self._bottom)
         p.fillRect(self.rect(), grad)
-
         fade = QLinearGradient(0, 0, 0, int(h * 0.24))
         fade.setColorAt(0.0, QColor(255, 255, 255, 22))
         fade.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.fillRect(0, 0, w, int(h * 0.24), fade)
-
         for b in self._bottles:
             cx, cy = b.x + math.sin((b.y * 0.01) + b.sway_phase + self._phase) * b.sway_amp, b.y
             s = 0.9 * b.scale
-
             if self._bottle_pm and not self._bottle_pm.isNull():
                 pm = self._bottle_pm.scaled(int(60 * s), int(120 * s), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 p.setOpacity(BOTTLE_ALPHA / 255.0)
@@ -365,7 +340,6 @@ class WaterBackground(QWidget):
                 p.setOpacity(1.0)
             else:
                 self._draw_ridged_vector_bottle(p, cx, cy, s, BOTTLE_ALPHA)
-
         def wave_path(y_base, amp, freq, shift):
             path = QPainterPath()
             path.moveTo(0, h)
@@ -375,16 +349,12 @@ class WaterBackground(QWidget):
             path.lineTo(w, h)
             path.closeSubpath()
             return path
-
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(255, 255, 255, int(255 * WAVE_OPACITY)))
         p.drawPath(wave_path(int(h * 0.70), 28, 0.016, 0.0))
         p.setBrush(QColor(255, 255, 255, int(255 * (WAVE_OPACITY * 0.70))))
         p.drawPath(wave_path(int(h * 0.78), 18, 0.020, 1.4))
 
-# ============================================================
-# Utility UI Classes
-# ============================================================
 class SecretExitCorner(QPushButton):
     def __init__(self, on_exit, parent=None):
         super().__init__("", parent)
@@ -407,15 +377,12 @@ class SecretExitCorner(QPushButton):
 class ThemedConfirmDialog(QDialog):
     def __init__(self, parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "No"):
         super().__init__(parent)
-        
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground) 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setModal(True)
         self.setFixedSize(760, 360)
-
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
         bg_frame = QFrame(self)
         bg_frame.setStyleSheet("""
             QFrame { 
@@ -425,43 +392,34 @@ class ThemedConfirmDialog(QDialog):
             }
         """)
         main_layout.addWidget(bg_frame)
-        
         root = QVBoxLayout(bg_frame)
         root.setContentsMargins(34, 30, 34, 26)
         root.setSpacing(18)
-
         title_lbl = QLabel(title)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_lbl.setFont(QFont(FONT_FAMILY, 28, QFont.Weight.Bold))
         title_lbl.setStyleSheet("color: rgba(255,255,255,0.98); border: none; background: transparent;")
-
         msg_lbl = QLabel(message)
         msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg_lbl.setWordWrap(True)
         msg_lbl.setFont(QFont(FONT_FAMILY, 21))
         msg_lbl.setStyleSheet("color: rgba(255,255,255,0.92); border: none; background: transparent;")
-
         btn_row = QHBoxLayout()
         btn_row.setSpacing(16)
         btn_row.addStretch(1)
-
         no_btn = QPushButton(no_text)
         no_btn.setFixedSize(320, 98)
         no_btn.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
         no_btn.setStyleSheet("QPushButton { background: rgba(255,255,255,0.20); color: white; border: 2px solid rgba(255,255,255,0.34); border-radius: 20px; } QPushButton:pressed { background: rgba(255,255,255,0.28); }")
-        
         yes_btn = QPushButton(yes_text)
         yes_btn.setFixedSize(320, 98)
         yes_btn.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold))
         yes_btn.setStyleSheet("QPushButton { background: rgba(255,255,255,0.94); color: #0B7A3B; border-radius: 20px; } QPushButton:pressed { background: rgba(255,255,255,0.78); }")
-
         no_btn.clicked.connect(self.reject)
         yes_btn.clicked.connect(self.accept)
-
         btn_row.addWidget(no_btn)
         btn_row.addWidget(yes_btn)
         btn_row.addStretch(1)
-
         root.addStretch(1); root.addWidget(title_lbl); root.addWidget(msg_lbl)
         root.addStretch(1); root.addLayout(btn_row)
 
@@ -481,18 +439,14 @@ class IdleRing(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        
         r = self.rect().adjusted(10, 10, -10, -10)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 255, 255, 26)); p.drawEllipse(r)
-
         track = QPen(QColor(255, 255, 255, 75), 10)
         track.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(track); p.setBrush(Qt.BrushStyle.NoBrush); p.drawArc(r, 0, 360 * 16)
-
         arc = QPen(QColor(255, 255, 255, 210), 10)
         arc.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(arc); p.drawArc(r, 90 * 16, int(-360 * 16 * self._progress))
-
         p.setPen(QColor(255, 255, 255, 255))
         p.setFont(QFont(FONT_FAMILY, 32, QFont.Weight.Bold))
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, str(self._seconds))
@@ -563,28 +517,20 @@ def make_card() -> QWidget:
     c.setStyleSheet("QWidget { background: rgba(255,255,255,0.16); border: 2px solid rgba(255,255,255,0.24); border-radius: 36px; }")
     return c
 
-
-# ============================================================
-# Dual-Threaded ONNX Bottle Verifier
-# ============================================================
 class ONNXBottleVerifier:
     def __init__(self, base_dir: str):
         self.enabled = bool(USE_ONNX_VERIFIER)
         self.available = False
         self.reason = "disabled"
         self.model_path = os.path.join(base_dir, ONNX_MODEL_PATH)
-        
         self._net, self._cap = None, None
         self._lock = threading.RLock()
-        
         self._active = False 
-        
         self._raw_frame_for_inference = None
         self._latest_bboxes = []
         self._last_detection = False
         self._last_conf = 0.0
         self._frame_count = 0
-        
         self._preview_qimage = None 
         self.running = False
 
@@ -645,30 +591,23 @@ class ONNXBottleVerifier:
             if not self._active:
                 time.sleep(0.2)
                 continue
-                
             if not self._ensure_camera():
                 time.sleep(0.5); continue
-                
             ok, frame = self._cap.read()
             if ok and frame is not None:
                 with self._lock:
                     self._raw_frame_for_inference = frame.copy()
                     yolo_boxes = list(self._latest_bboxes)
-
                 disp_frame = frame.copy()
-
                 for (x, y, bw, bh), score in yolo_boxes:
                     cv2.rectangle(disp_frame, (x, y), (x + bw, y + bh), (87, 255, 140), 3)
                     cv2.putText(disp_frame, f"Bottle {score:.2f}", (x, max(28, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (87, 255, 140), 2)
-
                 rgb = cv2.cvtColor(disp_frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb.shape
                 bytes_per_line = ch * w
                 qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-                
                 with self._lock:
                     self._preview_qimage = qimg
-                    
             else: time.sleep(0.01)
 
     def _inference_loop(self):
@@ -676,23 +615,18 @@ class ONNXBottleVerifier:
             if not self._active:
                 time.sleep(0.2)
                 continue
-                
             frame_to_infer = None
             with self._lock:
                 if self._raw_frame_for_inference is not None: 
                     frame_to_infer = self._raw_frame_for_inference.copy()
-            
             if frame_to_infer is None:
                 time.sleep(0.05); continue
-
             kept, detected, best_conf = self._run_model(frame_to_infer)
-
             with self._lock:
                 self._latest_bboxes = kept
                 self._last_detection = detected
                 self._last_conf = best_conf
                 self._frame_count += 1
-                
             time.sleep(0.02)
 
     def _run_model(self, frame):
@@ -703,32 +637,26 @@ class ONNXBottleVerifier:
         outputs = np.squeeze(outputs)
         if outputs.ndim == 1: outputs = np.expand_dims(outputs, 0)
         outputs = outputs.T
-
         boxes, scores = [], []
         best_conf = 0.0
-
         for row in outputs:
             if len(row) < 5: continue
             x, y, bw, bh = row[0:4]
             score = float(row[4])
             best_conf = max(best_conf, score)
             if score < ONNX_CONF_THRESHOLD: continue
-
             left, top = int((x - bw/2) * w / ONNX_INPUT_SIZE), int((y - bh/2) * h / ONNX_INPUT_SIZE)
             width, height = int(bw * w / ONNX_INPUT_SIZE), int(bh * h / ONNX_INPUT_SIZE)
             left, top = max(0, min(left, max(0, w - 2))), max(0, min(top, max(0, h - 2)))
             width, height = max(1, min(width, w - left)), max(1, min(height, h - top))
-
             boxes.append([left, top, width, height])
             scores.append(score)
-
         kept = []
         if boxes:
             indices = cv2.dnn.NMSBoxes(boxes, scores, ONNX_CONF_THRESHOLD, ONNX_NMS_THRESHOLD)
             for i in indices:
                 i = i[0] if isinstance(i, (tuple, list, np.ndarray)) else i
                 kept.append((boxes[i], scores[i]))
-
         return kept, len(kept) > 0, best_conf
 
     def get_preview_qimage(self):
@@ -754,19 +682,17 @@ class ONNXBottleVerifier:
                     positives += 1; consecutive += 1; best_consecutive = max(best_consecutive, consecutive)
                 else: consecutive = 0
             time.sleep(0.015)
-
         if reads == 0: return True 
         accepted = (positives >= ONNX_MIN_POSITIVES) or (best_consecutive >= 2) or (best >= 0.80 and positives >= 1)
         return accepted
 
-# ============================================================
-# Hardware Worker (Bulletproof Ultrasonic Debounce)
-# ============================================================
 class HardwareWorker(QThread):
     ui_mode = pyqtSignal(str)
     dropped = pyqtSignal()
     wake_requested = pyqtSignal()
     sensor_activity = pyqtSignal() 
+    rejected = pyqtSignal()
+    ready_scan = pyqtSignal()
 
     def __init__(self, verifier=None):
         super().__init__()
@@ -778,11 +704,8 @@ class HardwareWorker(QThread):
         self._verify_start = None
         self._pi = None
         self._wake_latched = False
-        
-        self._in_cooldown = False
         self._waiting_for_removal = False
         self._clear_start_time = 0.0
-        
         self._last_activity_emit = 0.0 
 
     def stop(self): self.running = False
@@ -790,7 +713,7 @@ class HardwareWorker(QThread):
     def set_session(self, enabled: bool):
         self.session_enabled = enabled
         self._verifying = self._latched = self._wake_latched = False
-        self._in_cooldown = self._waiting_for_removal = False
+        self._waiting_for_removal = False
         if enabled: self.ui_mode.emit("WAITING")
 
     def _distance_cm(self):
@@ -815,7 +738,6 @@ class HardwareWorker(QThread):
             if d is not None and (ULTRA_MIN_CM <= d <= ULTRA_MAX_CM):
                 hits += 1
             time.sleep(0.02) 
-            
         if strict:
             return hits >= 3
         else:
@@ -845,22 +767,14 @@ class HardwareWorker(QThread):
                         self._waiting_for_removal = False
                         self._latched = False
                         self.ui_mode.emit("WAITING")
+                        self.ready_scan.emit()
                     self.msleep(50)
                     continue
-                
-                if self._in_cooldown:
-                    time.sleep(COOLDOWN_SECONDS)
-                    self._in_cooldown = False
-                    self._latched = False
-                    self.ui_mode.emit("WAITING")
-                    continue
 
-                # --- NEW: SENSOR LOCK LOGIC ---
-                # Stop ultrasonic pinging completely while we verify and drop
                 if not self._verifying and not self._latched:
                     ready = self._object_present(strict=True)
                 else:
-                    ready = True # Force true to stay in sequence, ultrasonic is disabled
+                    ready = True
 
                 if ready:
                     now = time.monotonic()
@@ -886,9 +800,7 @@ class HardwareWorker(QThread):
 
                 if self._verifying:
                     self.ui_mode.emit("VERIFYING")
-                    
                     if (time.monotonic() - self._verify_start) >= VERIFY_SECONDS:
-                        
                         allow_drop = False
                         if self.verifier is not None and getattr(self.verifier, 'available', False):
                             try: allow_drop = bool(self.verifier.verify_once())
@@ -898,39 +810,33 @@ class HardwareWorker(QThread):
 
                         if not allow_drop:
                             self.ui_mode.emit("REJECTED")
+                            self.rejected.emit()
                             self._waiting_for_removal = True
                             self._clear_start_time = time.monotonic() 
                         else:
                             self.ui_mode.emit("DROPPING")
                             servo_pulse(SERVO_OPEN_US)
-                            
                             drop_start = time.monotonic()
                             bottle_fell = False
-                            
                             while (time.monotonic() - drop_start) < IR_DROP_TIMEOUT_S:
-                                # FAST POLLING 10ms for instant reaction
                                 if GPIO.input(GPIO_IR) == GPIO.LOW: 
                                     bottle_fell = True
-                                    
-                                    # IR DEBOUNCE TIMER
-                                    # 1. Wait until the bottle physically leaves the IR beam
                                     clear_time = time.monotonic()
                                     while GPIO.input(GPIO_IR) == GPIO.LOW and (time.monotonic() - clear_time) < 1.5:
                                         time.sleep(0.05)
-                                        
-                                    # 2. Add an extra hard pause so reflections don't double-trigger
                                     time.sleep(0.8) 
                                     break 
                                 time.sleep(0.01)
-                                
                             servo_pulse(SERVO_CLOSED_US, hold=True)
                             
                             if bottle_fell:
                                 self.dropped.emit()
-                                self._in_cooldown = True  
+                                self._latched = False
+                                self.ui_mode.emit("WAITING")
+                                self.ready_scan.emit()
                             else:
-                                print("[ANTI-CHEAT] Bottle pulled back! No points awarded.")
                                 self.ui_mode.emit("REJECTED")
+                                self.rejected.emit()
                                 self._waiting_for_removal = True
                                 self._clear_start_time = time.monotonic()
                 else:
@@ -949,10 +855,6 @@ class HardwareWorker(QThread):
             except Exception: pass
             GPIO.cleanup()
 
-
-# ============================================================
-# Redeem Arrow (glow) 
-# ============================================================
 class BouncingArrow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -980,7 +882,6 @@ class BouncingArrow(QWidget):
         w, h = self.width(), self.height()
         cx, cy = w * 0.70 + self._offset, h * 0.53
         arrow_w, arrow_h = 260, 140
-
         path = QPainterPath()
         x0, y0 = cx - arrow_w / 2, cy - arrow_h / 2
         path.addRoundedRect(float(x0), float(y0 + arrow_h*0.25), float(arrow_w*0.62), float(arrow_h*0.50), 24, 24)
@@ -988,14 +889,10 @@ class BouncingArrow(QWidget):
         head = QPainterPath()
         head.moveTo(float(hx), float(y0)); head.lineTo(float(x0 + arrow_w), float(cy)); head.lineTo(float(hx), float(y0 + arrow_h)); head.closeSubpath()
         path = path.united(head)
-
         p.setPen(QPen(QColor(255, 255, 255, 70), 20)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 255, 255, 190)); p.drawPath(path)
         p.setPen(QPen(QColor(255, 255, 255, 140), 6)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
 
-# ============================================================
-# QR Widget (scale+fade)
-# ============================================================
 class QRScaleWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1027,10 +924,6 @@ class QRScaleWidget(QWidget):
         pm = self._pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         p.drawPixmap((rect.width() - size) // 2, (rect.height() - size) // 2, pm)
 
-
-# ============================================================
-# Screens
-# ============================================================
 class MainScreen(WaterBackground):
     def __init__(self, kiosk, bottle_png_path: str):
         super().__init__(BG_TOP, BG_BOTTOM, bottle_png_path)
@@ -1039,13 +932,11 @@ class MainScreen(WaterBackground):
         title = ColoredEcoByteTitle()
         subtitle = QLabel("From Plastic, to Fantastic!")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter); subtitle.setFont(QFont(FONT_FAMILY, 28)); subtitle.setStyleSheet("color: rgba(255,255,255,0.88);")
-
         card = make_card(); card.setFixedHeight(410); card.setFixedWidth(860)
         cl = QVBoxLayout(card); cl.setContentsMargins(56, 44, 56, 44); cl.setSpacing(18)
         start_btn, redeem_btn = make_primary_button("START"), make_secondary_button("REDEEM LOAD")
         start_btn.clicked.connect(self.kiosk.start_session); redeem_btn.clicked.connect(self.kiosk.go_redeem)
         start_btn.clicked.connect(self.kiosk.snd.tap); redeem_btn.clicked.connect(self.kiosk.snd.tap)
-
         cl.addStretch(1); cl.addWidget(start_btn, alignment=Qt.AlignmentFlag.AlignCenter); cl.addWidget(redeem_btn, alignment=Qt.AlignmentFlag.AlignCenter); cl.addStretch(1)
         root.addStretch(2); root.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter); root.addWidget(subtitle); root.addSpacing(10); root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter); root.addStretch(3)
         self._corner = SecretExitCorner(self.kiosk.exit_app, self); self._corner.move(0, 0)
@@ -1057,36 +948,29 @@ class DepositScreen(WaterBackground):
         root = QVBoxLayout(self); root.setContentsMargins(70, 60, 70, 44); root.setSpacing(10)
         header = QLabel("Insert Bottle"); header.setAlignment(Qt.AlignmentFlag.AlignCenter); header.setFont(QFont(FONT_FAMILY, 62, QFont.Weight.Bold)); header.setStyleSheet("color: rgba(255,255,255,0.98);")
         self.status = QLabel("Waiting for bottle..."); self.status.setAlignment(Qt.AlignmentFlag.AlignCenter); self.status.setFont(QFont(FONT_FAMILY, 28)); self.status.setStyleSheet("color: rgba(255,255,255,0.92);")
-
         card = make_card(); card.setFixedHeight(700); card.setFixedWidth(980)
         cl = QVBoxLayout(card); cl.setContentsMargins(36, 28, 36, 30); cl.setSpacing(16)
         self.camera_label = QLabel(); self.camera_label.setFixedSize(860, 470); self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_label.setStyleSheet("background: rgba(0,0,0,0.18); border: 2px solid rgba(255,255,255,0.18); border-radius: 28px; color: rgba(255,255,255,0.72); font-size: 26px;"); self.camera_label.setText("Camera preview will appear here")
-
         counts_row = QHBoxLayout(); counts_row.setSpacing(24)
         c1 = QWidget(); c1.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;"); c1.setFixedHeight(110)
         l1 = QVBoxLayout(c1); l1.setContentsMargins(12, 10, 12, 10); l1.setSpacing(4)
         lb1 = QLabel("Accepted Bottles"); lb1.setAlignment(Qt.AlignmentFlag.AlignCenter); lb1.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold)); lb1.setStyleSheet("color: rgba(255,255,255,0.80);")
         self.bottles_lbl = AnimatedNumberLabel(""); self.bottles_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self.bottles_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold)); self.bottles_lbl.setStyleSheet("color: rgba(255,255,255,0.98);"); self.bottles_lbl.setText("0")
         l1.addWidget(lb1); l1.addWidget(self.bottles_lbl)
-
         c2 = QWidget(); c2.setStyleSheet("background: rgba(255,255,255,0.10); border: 1px solid rgba(255,255,255,0.18); border-radius: 24px;"); c2.setFixedHeight(110)
         l2 = QVBoxLayout(c2); l2.setContentsMargins(12, 10, 12, 10); l2.setSpacing(4)
         lb2 = QLabel("EcoPoints"); lb2.setAlignment(Qt.AlignmentFlag.AlignCenter); lb2.setFont(QFont(FONT_FAMILY, 18, QFont.Weight.Bold)); lb2.setStyleSheet("color: rgba(255,255,255,0.80);")
         self.points_lbl = AnimatedNumberLabel(""); self.points_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self.points_lbl.setFont(QFont(FONT_FAMILY, 42, QFont.Weight.Bold)); self.points_lbl.setStyleSheet("color: rgba(232,255,242,1);"); self.points_lbl.setText("0")
         l2.addWidget(lb2); l2.addWidget(self.points_lbl)
-
         counts_row.addWidget(c1); counts_row.addWidget(c2)
         cl.addStretch(1); cl.addWidget(self.camera_label, alignment=Qt.AlignmentFlag.AlignCenter); cl.addLayout(counts_row); cl.addStretch(1)
-
         btn_row = QHBoxLayout(); btn_row.setSpacing(18)
         back_btn, finish_btn = make_small_button("BACK"), make_small_button("FINISH")
         back_btn.clicked.connect(self.kiosk.confirm_back_from_deposit); finish_btn.clicked.connect(self.kiosk.finish_session)
         back_btn.clicked.connect(self.kiosk.snd.tap); finish_btn.clicked.connect(self.kiosk.snd.tap)
-
         btn_row.addStretch(1); btn_row.addWidget(back_btn); btn_row.addWidget(finish_btn); btn_row.addStretch(1)
         root.addWidget(header); root.addWidget(self.status); root.addStretch(1); root.addWidget(card, alignment=Qt.AlignmentFlag.AlignCenter); root.addStretch(1); root.addLayout(btn_row)
-
         self._preview_timer = QTimer(self); self._preview_timer.timeout.connect(self._update_preview)
         self._corner = SecretExitCorner(self.kiosk.exit_app, self); self._corner.move(0, 0)
 
@@ -1163,10 +1047,6 @@ class RedeemScreen(WaterBackground):
     def set_scanned_ok(self): self.status.setText("SCANNED OK"); self.status.setStyleSheet("color: rgba(232,255,242,1);")
     def set_scanned_bad(self): self.status.setText("INVALID / USED X"); self.status.setStyleSheet("color: rgba(255,220,220,1);")
 
-
-# ============================================================
-# Idle activity watcher
-# ============================================================
 class IdleEventFilter(QObject):
     activity = pyqtSignal()
     def eventFilter(self, obj, event):
@@ -1175,19 +1055,14 @@ class IdleEventFilter(QObject):
             self.activity.emit()
         return False
 
-# ============================================================
-# LED Controller (Blinking Logic Added)
-# ============================================================
 class LEDController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixels = None
         self._current_color = None 
         self._blink_state = False
-        
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._toggle_blink)
-        
         if neopixel is None or board is None: return
         try:
             self._pixels = neopixel.NeoPixel(board.D10, LED_COUNT, brightness=LED_BRIGHTNESS, auto_write=True, pixel_order=neopixel.GRB)
@@ -1206,9 +1081,9 @@ class LEDController(QObject):
     def _toggle_blink(self):
         self._blink_state = not self._blink_state
         if self._blink_state:
-            self._set_color((255, 0, 0)) # Red
+            self._set_color((255, 0, 0))
         else:
-            self._set_color((0, 0, 0))   # Off
+            self._set_color((0, 0, 0))
 
     def set_idle(self): 
         self._blink_timer.stop()
@@ -1234,69 +1109,51 @@ class LEDController(QObject):
         elif mode == "REJECTED": self.set_error()
         else: self.set_idle()
 
-
-# ============================================================
-# Kiosk Controller (Updated for Telegram & Presentation Mode)
-# ============================================================
 class Kiosk(QStackedWidget):
     def __init__(self, verifier_fn=None):
         super().__init__()
         self.verifier_fn = verifier_fn
-
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.showFullScreen()
         self.setCursor(Qt.CursorShape.BlankCursor)
-
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(screen)
         self.setFixedSize(screen.width(), screen.height())
-
         base_dir = os.path.dirname(os.path.abspath(__file__))
         try_load_tt_hoves(base_dir)
-
         self.snd = SoundManager(base_dir)
         self.snd.play_idle()
         self.fb = FirebaseClient(FIREBASE_URL)
-
         self.verifier = ONNXBottleVerifier(base_dir)
-        if self.verifier.enabled: print(f"[ONNX] verifier status: {self.verifier.reason}")
-        self.fb.log.connect(lambda s: print("[Firebase]", s))
-
+        self.fb.log.connect(lambda s: print(s))
         bottle_png = os.path.join(base_dir, "assets", "bottle.png")
-
         self.main = MainScreen(self, bottle_png)
         self.deposit = DepositScreen(self, bottle_png, self.verifier)
         self.qr = QRScreen(self, bottle_png)
         self.redeem = RedeemScreen(self, bottle_png)
-
         for page in (self.main, self.deposit, self.qr, self.redeem):
             page.setFixedSize(screen.width(), screen.height())
-
         self.addWidget(self.main); self.addWidget(self.deposit); self.addWidget(self.qr); self.addWidget(self.redeem)
         self.setCurrentWidget(self.main)
-
         self.session_bottles = 0
-        self.used_redeem_tokens = set() # NEW: Keeps track of used phone QRs for security
+        self.used_redeem_tokens = set()
         self.led = LEDController(self)
         self.led.set_idle()
-
         self.worker = HardwareWorker(verifier=self.verifier if self.verifier.available else None)
         self.worker.ui_mode.connect(self.deposit.set_mode)
         self.worker.ui_mode.connect(self.led.apply_mode)
         self.worker.dropped.connect(self.on_bottle_dropped)
         self.worker.wake_requested.connect(self.start_session_from_sensor)
         self.worker.sensor_activity.connect(self.reset_idle)
+        self.worker.rejected.connect(self.snd.invalid)
+        self.worker.ready_scan.connect(self.snd.ready)
         self.worker.start()
-
         self.redeem.scanned_text.connect(self.on_redeem_scanned)
-
         self.idle_timer = QTimer(self); self.idle_timer.timeout.connect(self.go_main)
         self.idle_indicator = IdleRing(self)
-        
         self._idle_visual_timer = QTimer(self); self._idle_visual_timer.timeout.connect(self.update_idle_indicator); self._idle_visual_timer.start(33) 
         self.reset_idle()
-
         self._filter = IdleEventFilter(); self._filter.activity.connect(self.reset_idle)
         QApplication.instance().installEventFilter(self._filter)
 
@@ -1306,16 +1163,11 @@ class Kiosk(QStackedWidget):
 
     def update_idle_indicator(self):
         if not hasattr(self, "idle_indicator"): return
-        
-        # --- NEW LOGIC: DON'T SHOW TIMER ON HOME SCREEN ---
         if self.currentWidget() == self.main:
             self.idle_indicator.hide()
             return 
-
         remaining = self.idle_timer.remainingTime()
         if remaining < 0: remaining = IDLE_TIMEOUT_MS
-        
-        # Only show the countdown ring in the last 10 seconds!
         if remaining <= 10000:
             if self.idle_indicator.isHidden(): 
                 self.idle_indicator.show()
@@ -1345,10 +1197,15 @@ class Kiosk(QStackedWidget):
         else: self.reset_idle()
 
     def go_main(self):
-        self.worker.set_session(False); self.led.set_idle(); self.session_bottles = 0; self.deposit.animate_counts(0); self.setCurrentWidget(self.main)
-        self.verifier.stop_scanning() # Camera sleeps
-        
-        # STOP the timer so it doesn't loop back to go_main while already there
+        self.worker.set_session(False)
+        self.led.set_idle()
+        self.session_bottles = 0
+        self.deposit.animate_counts(0)
+        self.redeem.status.setText("Scanner ready...")
+        self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
+        self.redeem._input.clear()
+        self.setCurrentWidget(self.main)
+        self.verifier.stop_scanning()
         self.idle_timer.stop() 
         self.idle_indicator.hide()
 
@@ -1357,12 +1214,17 @@ class Kiosk(QStackedWidget):
 
     def start_session(self):
         self.session_bottles = 0; self.deposit.animate_counts(0); self.worker.set_session(True); self.setCurrentWidget(self.deposit)
-        self.verifier.start_scanning() # Camera wakes up!
+        self.verifier.start_scanning()
         self.reset_idle()
 
     def go_redeem(self):
-        self.worker.set_session(False); self.led.set_idle(); self.setCurrentWidget(self.redeem)
-        self.verifier.stop_scanning() # Camera sleeps
+        self.worker.set_session(False)
+        self.led.set_idle()
+        self.redeem.status.setText("Scanner ready...")
+        self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
+        self.redeem._input.clear()
+        self.setCurrentWidget(self.redeem)
+        self.verifier.stop_scanning()
         self.reset_idle()
 
     def on_bottle_dropped(self):
@@ -1372,7 +1234,7 @@ class Kiosk(QStackedWidget):
 
     def finish_session(self):
         self.worker.set_session(False); self.led.set_idle()
-        self.verifier.stop_scanning() # Camera sleeps
+        self.verifier.stop_scanning()
         if self.session_bottles <= 0: return self.go_main()
         points = self.session_bottles * POINTS_PER_BOTTLE
         token_id = "ECO" + uuid.uuid4().hex[:12]
@@ -1385,72 +1247,46 @@ class Kiosk(QStackedWidget):
     def on_redeem_scanned(self, scanned: str):
         self.reset_idle(); self.snd.tap()
         self.redeem.status.setText("Reading App QR..."); self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.82);")
-        
-        # --- NEW: ANTI-REUSE SECURITY ---
         if scanned in self.used_redeem_tokens:
             self.redeem.set_scanned_bad()
             self.redeem.status.setText("ALREADY CLAIMED X")
             QTimer.singleShot(2200, self.go_main)
             return
-        
         try:
-            # Parse the JSON from the MIT App's QR Code
             data = json.loads(scanned)
             if data.get("type") == "redeem":
                 amount = data.get("amount", 0)
                 number = data.get("number", "Unknown Number")
-                
-                # Lock this exact QR code string so it can't be used again
                 self.used_redeem_tokens.add(scanned)
-                
-                # Start the Hollywood UI Sequence
                 self._process_simulated_load(amount, number)
                 return
         except Exception:
             pass
-            
-        # Fallback if it's an invalid/unrecognized QR
         self.redeem.set_scanned_bad()
         QTimer.singleShot(2200, self.go_main)
 
     def _process_simulated_load(self, amount, number):
-        # --- START SMS SIMULATION SEQUENCE ---
         self.redeem.status.setText(f"Validating EcoPoints for {number}...")
         self.redeem.status.setStyleSheet("color: rgba(255,255,255,0.92);")
-        
-        # 1.5 seconds later
         QTimer.singleShot(1500, lambda: self.redeem.status.setText("Connecting to Smart/Globe Gateway..."))
-        
-        # 3.0 seconds later
         QTimer.singleShot(3000, lambda: self.redeem.status.setText(f"Dispensing ₱{amount}.00 Regular Load..."))
-        
-        # 4.5 seconds later: Fire Telegram & Show Success
         def show_success():
             self.redeem.set_scanned_ok()
             self.redeem.status.setText("SUCCESS! Load Transferred.")
             self.snd.success()
             self._send_telegram_alert(amount, number)
-            
         QTimer.singleShot(4500, show_success)
-        
-        # 7.0 seconds later: Return to home screen
         QTimer.singleShot(7000, self.go_main)
 
     def _send_telegram_alert(self, amount, number):
-        # Fire the Telegram Webhook in the background so it doesn't freeze the screen
         def worker():
-            # Treat the 'number' from the MIT App QR as the Telegram Chat ID
             target_chat_id = str(number).strip()
-            
             msg = f"🌿 EcoByte Alert: ₱{amount}.00 Regular Load has been successfully credited to {number}! Thank you for recycling."
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            
             try:
-                # Replace the hardcoded TELEGRAM_CHAT_ID with the dynamic target_chat_id
                 requests.post(url, json={"chat_id": target_chat_id, "text": msg}, timeout=5)
             except Exception as e:
-                print(f"Telegram Error: {e}")
-                
+                pass
         threading.Thread(target=worker, daemon=True).start()
 
     def exit_app(self):
