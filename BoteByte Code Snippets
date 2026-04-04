@@ -1,0 +1,222 @@
+import os
+import sys
+import time
+import uuid
+import qrcode
+from datetime import datetime
+from PIL import Image, ImageDraw
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QPixmap, QImage, QColor, QFont
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton,
+    QVBoxLayout, QHBoxLayout, QFrame
+)
+
+# =====================================================
+# PUBLIC DEMO VERSION (SAFE FOR GITHUB)
+# -----------------------------------------------------
+# This is a showcase build for exhibits / GitHub.
+# All hardware logic (GPIO, Servo, IR, Ultrasonic, ONNX)
+# and sensitive cloud logic has been removed.
+# =====================================================
+
+PROJECT_NAME = "BoteByte Exhibit Build"
+IDLE_TIMEOUT_MS = 60000
+
+# Replace with your actual exhibit link (Google Drive / GitHub Pages / etc.)
+EXHIBIT_LINK = "https://example.com"
+
+# Optional logo for QR center icon
+LOGO_PATH = "logo.png"
+
+
+def qr_pixmap_from_text(text: str, logo_path: str, size_px: int = 560) -> QPixmap:
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=2
+    )
+    qr.add_data(text)
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color="#164863", back_color="white").convert("RGBA")
+    img = img.resize((size_px, size_px), Image.Resampling.LANCZOS)
+
+    if os.path.exists(logo_path):
+        logo = Image.open(logo_path).convert("RGBA")
+        logo_size = int(size_px * 0.22)
+        logo = logo.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
+
+        logo_pos = ((size_px - logo_size) // 2, (size_px - logo_size) // 2)
+
+        box_size = int(size_px * 0.26)
+        box_pos = ((size_px - box_size) // 2, (size_px - box_size) // 2)
+
+        mask = Image.new("L", (size_px, size_px), 255)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse([box_pos, (box_pos[0] + box_size, box_pos[1] + box_size)], fill=0)
+
+        img.putalpha(mask)
+        img.paste(logo, logo_pos, logo)
+
+    img = img.convert("RGB")
+    img_data = img.tobytes("raw", "RGB")
+    q_img = QImage(img_data, size_px, size_px, 3 * size_px, QImage.Format.Format_RGB888)
+
+    return QPixmap.fromImage(q_img)
+
+
+class DemoMachineBackend:
+    """
+    This is a SAFE mock backend.
+
+    In the private build, this is where your:
+    - GPIO bottle detection
+    - IR verification
+    - servo open/close
+    - camera ONNX validation
+    - firebase redeem/deposit
+    would exist.
+    """
+
+    def __init__(self):
+        self.points = 0
+        self.bottle_count = 0
+
+    def simulate_bottle_drop(self):
+        """Simulates bottle detection (demo mode)."""
+        self.bottle_count += 1
+        self.points += 5
+
+    def generate_token(self):
+        """Generates a mock claim token."""
+        return str(uuid.uuid4()).split("-")[0].upper()
+
+
+class ExhibitWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(PROJECT_NAME)
+        self.setStyleSheet("background-color: #e0f2fe;")
+
+        self.backend = DemoMachineBackend()
+        self.last_interaction = time.time()
+
+        self.title = QLabel("BoteByte Exhibit Demo")
+        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title.setStyleSheet("color: #164863; font-size: 48px; font-weight: 900;")
+        self.title.setFont(QFont("Arial", 22))
+
+        self.subtitle = QLabel("Scan the QR Code to learn more")
+        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.subtitle.setStyleSheet("color: #0f172a; font-size: 20px;")
+
+        self.qr_label = QLabel()
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setPixmap(qr_pixmap_from_text(EXHIBIT_LINK, LOGO_PATH))
+
+        self.stats_frame = QFrame()
+        self.stats_frame.setStyleSheet("""
+            QFrame {
+                background: white;
+                border-radius: 18px;
+                border: 3px solid #164863;
+            }
+        """)
+
+        stats_layout = QVBoxLayout(self.stats_frame)
+
+        self.points_label = QLabel("Points: 0")
+        self.points_label.setStyleSheet("font-size: 26px; font-weight: 800; color: #164863;")
+        self.points_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.bottle_label = QLabel("Bottles: 0")
+        self.bottle_label.setStyleSheet("font-size: 22px; font-weight: 700; color: #0f172a;")
+        self.bottle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        stats_layout.addWidget(self.points_label)
+        stats_layout.addWidget(self.bottle_label)
+
+        self.simulate_btn = QPushButton("SIMULATE BOTTLE DROP")
+        self.simulate_btn.setStyleSheet("""
+            QPushButton {
+                background: #10b981;
+                color: white;
+                font-size: 22px;
+                font-weight: 900;
+                border-radius: 18px;
+                padding: 18px;
+            }
+            QPushButton:hover {
+                background: #059669;
+            }
+        """)
+        self.simulate_btn.clicked.connect(self.simulate_drop)
+
+        self.token_btn = QPushButton("GENERATE CLAIM TOKEN")
+        self.token_btn.setStyleSheet("""
+            QPushButton {
+                background: #164863;
+                color: white;
+                font-size: 20px;
+                font-weight: 900;
+                border-radius: 18px;
+                padding: 18px;
+            }
+            QPushButton:hover {
+                background: #0f3550;
+            }
+        """)
+        self.token_btn.clicked.connect(self.generate_claim)
+
+        self.token_label = QLabel("Token: ---")
+        self.token_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.token_label.setStyleSheet("font-size: 22px; font-weight: 800; color: #0f172a;")
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.simulate_btn)
+        btn_row.addWidget(self.token_btn)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(40, 40, 40, 40)
+        root.setSpacing(25)
+
+        root.addWidget(self.title)
+        root.addWidget(self.subtitle)
+        root.addWidget(self.qr_label)
+        root.addWidget(self.stats_frame)
+        root.addLayout(btn_row)
+        root.addWidget(self.token_label)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.check_idle)
+        self.timer.start(1000)
+
+    def simulate_drop(self):
+        self.last_interaction = time.time()
+        self.backend.simulate_bottle_drop()
+        self.refresh_stats()
+
+    def generate_claim(self):
+        self.last_interaction = time.time()
+        token = self.backend.generate_token()
+        self.token_label.setText(f"Token: {token}")
+
+    def refresh_stats(self):
+        self.points_label.setText(f"Points: {self.backend.points}")
+        self.bottle_label.setText(f"Bottles: {self.backend.bottle_count}")
+
+    def check_idle(self):
+        if (time.time() - self.last_interaction) * 1000 > IDLE_TIMEOUT_MS:
+            self.token_label.setText("Token: ---")
+            # reset view behavior can go here
+            self.last_interaction = time.time()
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = ExhibitWindow()
+    win.showFullScreen()  # kiosk-style
+    sys.exit(app.exec())
